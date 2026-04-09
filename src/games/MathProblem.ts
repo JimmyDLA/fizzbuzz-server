@@ -53,7 +53,11 @@ const generateMathProblem = () => {
 };
 
 export class MathProblem implements IMiniGame {
+  private currentQuestionIndex: number = 0;
+  private readonly maxQuestions = 3;
+
   onInit(state: LobbyState): void {
+    this.currentQuestionIndex = 0;
     const puz = generateMathProblem();
     
     const gameData = {
@@ -62,6 +66,8 @@ export class MathProblem implements IMiniGame {
       correct: puz.correct,
       winnerId: null as string | null,
       gameOver: false,
+      isLockedOut: false,
+      index: this.currentQuestionIndex,
       wrongAnswers: [] as number[],
     };
 
@@ -69,7 +75,7 @@ export class MathProblem implements IMiniGame {
     state.selectedPlayers.forEach(id => {
       const p = state.players.get(id);
       if (p) {
-        p.gameScore = 0; // Tracker flags: 0 = solving, 1 = correct winner, -1 = definitively incorrect
+        p.gameScore = 0;
         p.gameData = JSON.stringify(gameData);
       }
     });
@@ -81,13 +87,14 @@ export class MathProblem implements IMiniGame {
       if (!p || !state.selectedPlayers.includes(client.sessionId)) return;
 
       const pData = JSON.parse(p.gameData || "{}");
-      if (pData.gameOver) return;
+      if (pData.gameOver || pData.isLockedOut) return;
       if (pData.wrongAnswers && pData.wrongAnswers.includes(message.answer)) return;
 
       if (message.answer === pData.correct) {
         p.gameScore += 1;
+        this.currentQuestionIndex++;
 
-        if (p.gameScore >= 3) {
+        if (this.currentQuestionIndex >= this.maxQuestions) {
           pData.winnerId = client.sessionId;
           pData.gameOver = true;
           
@@ -97,13 +104,13 @@ export class MathProblem implements IMiniGame {
                 const lp = JSON.parse(player.gameData);
                 lp.winnerId = client.sessionId;
                 lp.gameOver = true;
+                lp.index = this.currentQuestionIndex;
                 player.gameData = JSON.stringify(lp);
              }
           });
           state.timer = 1;
 
         } else {
-          // Player advanced, generate new puzzle for everyone flawlessly syncing state
           const puz = generateMathProblem();
           
           state.selectedPlayers.forEach(id => {
@@ -114,15 +121,61 @@ export class MathProblem implements IMiniGame {
                 lp.options = puz.options;
                 lp.correct = puz.correct;
                 lp.wrongAnswers = [];
+                lp.isLockedOut = false;
+                lp.index = this.currentQuestionIndex;
                 player.gameData = JSON.stringify(lp);
              }
           });
         }
       } else {
-        // Punish player locally immediately
         pData.wrongAnswers = pData.wrongAnswers || [];
         pData.wrongAnswers.push(message.answer);
+        pData.isLockedOut = true;
         p.gameData = JSON.stringify(pData);
+
+        let allLockedOut = true;
+        state.selectedPlayers.forEach(id => {
+          const sp = state.players.get(id);
+          if (sp) {
+            let spData: any = {};
+            try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
+            if (!spData.isLockedOut) {
+              allLockedOut = false;
+            }
+          }
+        });
+
+        if (allLockedOut) {
+          this.currentQuestionIndex++;
+          
+          if (this.currentQuestionIndex >= this.maxQuestions) {
+            state.selectedPlayers.forEach(id => {
+               const player = state.players.get(id);
+               if (player) {
+                  const lp = JSON.parse(player.gameData);
+                  lp.gameOver = true;
+                  lp.index = this.currentQuestionIndex;
+                  player.gameData = JSON.stringify(lp);
+               }
+            });
+            state.timer = 1;
+          } else {
+            const puz = generateMathProblem();
+            state.selectedPlayers.forEach(id => {
+               const player = state.players.get(id);
+               if (player) {
+                  const lp = JSON.parse(player.gameData);
+                  lp.question = puz.question;
+                  lp.options = puz.options;
+                  lp.correct = puz.correct;
+                  lp.wrongAnswers = [];
+                  lp.isLockedOut = false;
+                  lp.index = this.currentQuestionIndex;
+                  player.gameData = JSON.stringify(lp);
+               }
+            });
+          }
+        }
       }
     }
   }
@@ -130,20 +183,31 @@ export class MathProblem implements IMiniGame {
   onTick(state: LobbyState): void {}
 
   onEnd(state: LobbyState): void {
-    let maxScore = -1;
     let winners: string[] = [];
+    const ids = state.selectedPlayers.toArray();
 
-    state.selectedPlayers.forEach(id => {
-      const p = state.players.get(id);
-      if (p) {
-        if (p.gameScore > maxScore) {
-          maxScore = p.gameScore;
-          winners = [id];
-        } else if (p.gameScore === maxScore) {
-          winners.push(id);
+    if (state.currentGameType === "2v2" && ids.length === 4) {
+      const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
+      const t2Score = (state.players.get(ids[2])?.gameScore || 0) + (state.players.get(ids[3])?.gameScore || 0);
+
+      if (t1Score >= t2Score && t1Score > 0) winners.push(ids[0], ids[1]);
+      if (t2Score >= t1Score && t2Score > 0) winners.push(ids[2], ids[3]);
+    } else {
+      let maxScore = -1;
+      ids.forEach(id => {
+        const p = state.players.get(id);
+        if (p) {
+          if (p.gameScore > maxScore) {
+            maxScore = p.gameScore;
+            winners = [id];
+          } else if (p.gameScore === maxScore) {
+            winners.push(id);
+          }
         }
-      }
-    });
+      });
+      // Winners only count if score > 0
+      if (maxScore <= 0) winners = [];
+    }
 
     state.lastWinners.clear();
     state.lastLosers.clear();

@@ -6,9 +6,10 @@ import { MathProblem } from "../games/MathProblem";
 import { HotPotato } from "../games/HotPotato";
 import { LumberCut } from "../games/LumberCut";
 import { Trivia } from "../games/Trivia";
+import { RockPaperScissors } from "../games/RockPaperScissors";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
-const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia"];
+const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors"];
 
 export class LobbyRoom extends Room {
   state!: LobbyState;
@@ -82,11 +83,33 @@ export class LobbyRoom extends Room {
     this.state.players.set(client.sessionId, player);
   }
 
-  onLeave(client: Client, code?: number) {
-    console.log(client.sessionId, "left!");
-    this.state.players.delete(client.sessionId);
+  async onLeave(client: Client, consented?: any) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
 
-    if (this.state.players.size > 0) {
+    if (consented) {
+      console.log(client.sessionId, "consented leave.");
+      this.removePlayer(client.sessionId);
+    } else {
+      console.log(client.sessionId, "abnormal leave! Waiting 120s...");
+      player.isConnected = false;
+      
+      try {
+        await this.allowReconnection(client, 120);
+        console.log(client.sessionId, "successfully reconnected!");
+        player.isConnected = true;
+      } catch (e) {
+        console.log(client.sessionId, "grace period expired!");
+        this.removePlayer(client.sessionId);
+      }
+    }
+  }
+
+  private removePlayer(sessionId: string) {
+    const wasHost = this.state.players.get(sessionId)?.isHost;
+    this.state.players.delete(sessionId);
+    
+    if (wasHost && this.state.players.size > 0) {
       const firstPlayerKey = Array.from(this.state.players.keys())[0];
       const newHost = this.state.players.get(firstPlayerKey);
       if (newHost) newHost.isHost = true;
@@ -130,6 +153,13 @@ export class LobbyRoom extends Room {
     this.state.phase = "wheel";
     this.state.currentGameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
     this.state.currentCategory = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
+
+    // Enforce Category Restrictions
+    if (this.state.currentCategory === "Rock Paper Scissors") {
+      this.state.currentGameType = "1v1";
+    } else if (this.state.currentCategory === "Hot Potato" && this.state.currentGameType === "2v2") {
+      this.state.currentGameType = "1v1"; // Fallback from 2v2 for Hot Potato
+    }
 
     // Select subset of players
     const allPlayerIds = Array.from(this.state.players.keys());
@@ -211,6 +241,10 @@ export class LobbyRoom extends Room {
       case "Trivia":
         this.activeGame = new Trivia();
         this.state.timer = 45; // 3 questions
+        break;
+      case "Rock Paper Scissors":
+        this.activeGame = new RockPaperScissors();
+        this.state.timer = 60; // Max duration, usually ends earlier via logic
         break;
       default:
         this.activeGame = new TappingRace();

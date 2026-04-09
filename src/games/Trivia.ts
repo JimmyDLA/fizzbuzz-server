@@ -66,7 +66,8 @@ export class Trivia implements IMiniGame {
       index: this.currentQuestionIndex,
       total: this.currentBatch.length,
       answeredCorrectly: false,
-      isTransitioning: false
+      isTransitioning: false,
+      isLockedOut: false
     };
 
     state.selectedPlayers.forEach(id => {
@@ -103,11 +104,15 @@ export class Trivia implements IMiniGame {
   }
 
   onMessage(client: Client, message: any, state: LobbyState): void {
-    if (message.action === "answer") {
+      if (message.action === "answer") {
       if (this.isTransitioning) return;
 
       const player = state.players.get(client.sessionId);
       if (!player || !state.selectedPlayers.includes(client.sessionId)) return;
+
+      let oldData: any = {};
+      try { oldData = JSON.parse(player.gameData || "{}"); } catch (e) {}
+      if (oldData.isLockedOut) return;
 
       const q = this.currentBatch[this.currentQuestionIndex];
       if (!q) return;
@@ -128,8 +133,34 @@ export class Trivia implements IMiniGame {
           }
         }, 2000);
       } else {
-        // Feedback for wrong answer could be handled client-side
-        // or we could mark the player's gameData with "wrong"
+        // Punish player for wrong answer by locking them out of the current question
+        player.gameData = JSON.stringify({
+          ...oldData,
+          isLockedOut: true
+        });
+
+        // Check if ALL selected players are now locked out
+        let allLockedOut = true;
+        state.selectedPlayers.forEach(id => {
+          const sp = state.players.get(id);
+          if (sp) {
+            let spData: any = {};
+            try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
+            if (!spData.isLockedOut) {
+              allLockedOut = false;
+            }
+          }
+        });
+
+        if (allLockedOut) {
+          // Everyone got it wrong! Skip to the next question immediately
+          this.currentQuestionIndex++;
+          if (this.currentQuestionIndex >= this.currentBatch.length) {
+            state.timer = 0; // Force end the game loop immediately
+          } else {
+            this.broadcastState(state);
+          }
+        }
       }
     }
   }
@@ -137,20 +168,31 @@ export class Trivia implements IMiniGame {
   onTick(state: LobbyState): void {}
 
   onEnd(state: LobbyState): void {
-    let maxScore = -1;
     let winners: string[] = [];
+    const ids = state.selectedPlayers.toArray();
 
-    state.selectedPlayers.forEach(id => {
-      const p = state.players.get(id);
-      if (p) {
-        if (p.gameScore > maxScore) {
-          maxScore = p.gameScore;
-          winners = [id];
-        } else if (p.gameScore === maxScore) {
-          winners.push(id);
+    if (state.currentGameType === "2v2" && ids.length === 4) {
+      const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
+      const t2Score = (state.players.get(ids[2])?.gameScore || 0) + (state.players.get(ids[3])?.gameScore || 0);
+
+      if (t1Score >= t2Score && t1Score > 0) winners.push(ids[0], ids[1]);
+      if (t2Score >= t1Score && t2Score > 0) winners.push(ids[2], ids[3]);
+    } else {
+      let maxScore = -1;
+      ids.forEach(id => {
+        const p = state.players.get(id);
+        if (p) {
+          if (p.gameScore > maxScore) {
+            maxScore = p.gameScore;
+            winners = [id];
+          } else if (p.gameScore === maxScore) {
+            winners.push(id);
+          }
         }
-      }
-    });
+      });
+      // Winners only count if score > 0
+      if (maxScore <= 0) winners = [];
+    }
 
     state.lastWinners.clear();
     state.lastLosers.clear();
@@ -158,7 +200,7 @@ export class Trivia implements IMiniGame {
     state.selectedPlayers.forEach(id => {
       const p = state.players.get(id);
       if (p) {
-        if (winners.length > 0 && winners.includes(id) && maxScore > 0) {
+        if (winners.length > 0 && winners.includes(id)) {
           p.score += 3;
           state.lastWinners.push(id);
         } else {

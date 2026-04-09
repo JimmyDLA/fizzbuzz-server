@@ -9,6 +9,7 @@ export class Player extends Schema {
   @type("number") drinks: number = 0;
   @type("number") gameScore: number = 0; // Transient scoring (taps, points)
   @type("string") gameData: string = ""; // Temporary JSON schema state
+  @type("boolean") isConnected: boolean = true;
 }
 
 export class LobbyState extends Schema {

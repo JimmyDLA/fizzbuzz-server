@@ -25,20 +25,29 @@ export class TappingRace implements IMiniGame {
   }
 
   onEnd(state: LobbyState): void {
-    let maxScore = -1;
     let winners: string[] = [];
+    const ids = state.selectedPlayers.toArray();
 
-    state.selectedPlayers.forEach(id => {
-      const p = state.players.get(id);
-      if (p) {
-        if (p.gameScore > maxScore) {
-          maxScore = p.gameScore;
-          winners = [id];
-        } else if (p.gameScore === maxScore) {
-          winners.push(id);
+    if (state.currentGameType === "2v2" && ids.length === 4) {
+      const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
+      const t2Score = (state.players.get(ids[2])?.gameScore || 0) + (state.players.get(ids[3])?.gameScore || 0);
+
+      if (t1Score >= t2Score) winners.push(ids[0], ids[1]);
+      if (t2Score >= t1Score) winners.push(ids[2], ids[3]);
+    } else {
+      let maxScore = -1;
+      ids.forEach(id => {
+        const p = state.players.get(id);
+        if (p) {
+          if (p.gameScore > maxScore) {
+            maxScore = p.gameScore;
+            winners = [id];
+          } else if (p.gameScore === maxScore) {
+            winners.push(id);
+          }
         }
-      }
-    });
+      });
+    }
 
     // Resolve universal variables
     state.lastWinners.clear();
