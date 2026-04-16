@@ -11,6 +11,7 @@ import { Cyclone } from "../games/Cyclone";
 import { BalloonInflate } from "../games/BalloonInflate";
 import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
+import { ScreenPainting } from "../games/ScreenPainting";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble"];
@@ -265,6 +266,10 @@ export class LobbyRoom extends Room {
       case "Scrabble":
         this.activeGame = new Scrabble();
         this.state.timer = 45; // Generous time for forming words
+        break;
+      case "Screen Painting":
+        this.activeGame = new ScreenPainting();
+        this.state.timer = 25; // Race against time
         break;
       default:
         this.activeGame = new TappingRace();
