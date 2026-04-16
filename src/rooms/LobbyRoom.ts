@@ -7,9 +7,10 @@ import { HotPotato } from "../games/HotPotato";
 import { LumberCut } from "../games/LumberCut";
 import { Trivia } from "../games/Trivia";
 import { RockPaperScissors } from "../games/RockPaperScissors";
+import { ScreenPainting } from "../games/ScreenPainting";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
-const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors"];
+const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Screen Painting"];
 
 export class LobbyRoom extends Room {
   state!: LobbyState;
@@ -157,6 +158,8 @@ export class LobbyRoom extends Room {
     // Enforce Category Restrictions
     if (this.state.currentCategory === "Rock Paper Scissors") {
       this.state.currentGameType = "1v1";
+    } else if (this.state.currentCategory === "Screen Painting") {
+      if (this.state.currentGameType === "2v2") this.state.currentGameType = "BR";
     } else if (this.state.currentCategory === "Hot Potato" && this.state.currentGameType === "2v2") {
       this.state.currentGameType = "1v1"; // Fallback from 2v2 for Hot Potato
     }
@@ -245,6 +248,10 @@ export class LobbyRoom extends Room {
       case "Rock Paper Scissors":
         this.activeGame = new RockPaperScissors();
         this.state.timer = 60; // Max duration, usually ends earlier via logic
+        break;
+      case "Screen Painting":
+        this.activeGame = new ScreenPainting();
+        this.state.timer = 25; // Race against time
         break;
       default:
         this.activeGame = new TappingRace();
