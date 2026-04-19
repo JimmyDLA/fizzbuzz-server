@@ -7,9 +7,10 @@ import { HotPotato } from "../games/HotPotato";
 import { LumberCut } from "../games/LumberCut";
 import { Trivia } from "../games/Trivia";
 import { RockPaperScissors } from "../games/RockPaperScissors";
+import { Cyclone } from "../games/Cyclone";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
-const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors"];
+const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone"];
 
 export class LobbyRoom extends Room {
   state!: LobbyState;
@@ -246,6 +247,10 @@ export class LobbyRoom extends Room {
         this.activeGame = new RockPaperScissors();
         this.state.timer = 60; // Max duration, usually ends earlier via logic
         break;
+      case "Cyclone":
+        this.activeGame = new Cyclone();
+        this.state.timer = 30; // Max time to hit stop
+        break;
       default:
         this.activeGame = new TappingRace();
     }
@@ -266,8 +271,13 @@ export class LobbyRoom extends Room {
         if (this.activeGame) {
           this.activeGame.onEnd(this.state);
         }
-        this.activeGame = null;
-        this.startResolutionPhase();
+        
+        // Give clients 4 seconds to view the end-state/results of the game 
+        // BEFORE shifting to the resolution scoreboard phase
+        setTimeout(() => {
+          this.activeGame = null;
+          this.startResolutionPhase();
+        }, 4000);
       }
     }, 1000);
   }
