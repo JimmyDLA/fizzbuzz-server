@@ -8,9 +8,10 @@ import { LumberCut } from "../games/LumberCut";
 import { Trivia } from "../games/Trivia";
 import { RockPaperScissors } from "../games/RockPaperScissors";
 import { Cyclone } from "../games/Cyclone";
+import { BalloonInflate } from "../games/BalloonInflate";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
-const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone"];
+const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate"];
 
 export class LobbyRoom extends Room {
   state!: LobbyState;
@@ -94,7 +95,7 @@ export class LobbyRoom extends Room {
     } else {
       console.log(client.sessionId, "abnormal leave! Waiting 120s...");
       player.isConnected = false;
-      
+
       try {
         await this.allowReconnection(client, 120);
         console.log(client.sessionId, "successfully reconnected!");
@@ -109,7 +110,7 @@ export class LobbyRoom extends Room {
   private removePlayer(sessionId: string) {
     const wasHost = this.state.players.get(sessionId)?.isHost;
     this.state.players.delete(sessionId);
-    
+
     if (wasHost && this.state.players.size > 0) {
       const firstPlayerKey = Array.from(this.state.players.keys())[0];
       const newHost = this.state.players.get(firstPlayerKey);
@@ -251,6 +252,10 @@ export class LobbyRoom extends Room {
         this.activeGame = new Cyclone();
         this.state.timer = 30; // Max time to hit stop
         break;
+      case "Balloon Inflate":
+        this.activeGame = new BalloonInflate();
+        this.state.timer = 1000; // Race to pop balloon
+        break;
       default:
         this.activeGame = new TappingRace();
     }
@@ -271,13 +276,13 @@ export class LobbyRoom extends Room {
         if (this.activeGame) {
           this.activeGame.onEnd(this.state);
         }
-        
-        // Give clients 4 seconds to view the end-state/results of the game 
+
+        // Give clients 3 seconds to view the end-state/results of the game 
         // BEFORE shifting to the resolution scoreboard phase
         setTimeout(() => {
           this.activeGame = null;
           this.startResolutionPhase();
-        }, 4000);
+        }, 3000);
       }
     }, 1000);
   }

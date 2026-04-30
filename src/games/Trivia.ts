@@ -42,11 +42,11 @@ export class Trivia implements IMiniGame {
     if (Trivia.questionPool.length < 3) {
       await Trivia.ensurePool();
     }
-    
+
     this.currentBatch = Trivia.questionPool.splice(0, 3);
-    
+
     if (Trivia.questionPool.length <= 1) {
-       Trivia.ensurePool(); 
+      Trivia.ensurePool();
     }
 
     this.currentQuestionIndex = 0;
@@ -83,7 +83,7 @@ export class Trivia implements IMiniGame {
       const p = state.players.get(id);
       if (p) {
         let oldData: any = {};
-        try { oldData = JSON.parse(p.gameData || "{}"); } catch (e) {}
+        try { oldData = JSON.parse(p.gameData || "{}"); } catch (e) { }
         p.gameData = JSON.stringify({
           ...oldData,
           isTransitioning: true,
@@ -104,14 +104,14 @@ export class Trivia implements IMiniGame {
   }
 
   onMessage(client: Client, message: any, state: LobbyState): void {
-      if (message.action === "answer") {
+    if (message.action === "answer") {
       if (this.isTransitioning) return;
 
       const player = state.players.get(client.sessionId);
       if (!player || !state.selectedPlayers.includes(client.sessionId)) return;
 
       let oldData: any = {};
-      try { oldData = JSON.parse(player.gameData || "{}"); } catch (e) {}
+      try { oldData = JSON.parse(player.gameData || "{}"); } catch (e) { }
       if (oldData.isLockedOut) return;
 
       const q = this.currentBatch[this.currentQuestionIndex];
@@ -125,13 +125,13 @@ export class Trivia implements IMiniGame {
         setTimeout(() => {
           this.isTransitioning = false;
           this.currentQuestionIndex++;
-          
+
           if (this.currentQuestionIndex >= this.currentBatch.length) {
             state.timer = 0; // Force end the game loop immediately
           } else {
             this.broadcastState(state);
           }
-        }, 2000);
+        }, 3000);
       } else {
         // Punish player for wrong answer by locking them out of the current question
         player.gameData = JSON.stringify({
@@ -145,7 +145,7 @@ export class Trivia implements IMiniGame {
           const sp = state.players.get(id);
           if (sp) {
             let spData: any = {};
-            try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
+            try { spData = JSON.parse(sp.gameData || "{}"); } catch (e) { }
             if (!spData.isLockedOut) {
               allLockedOut = false;
             }
@@ -165,7 +165,7 @@ export class Trivia implements IMiniGame {
     }
   }
 
-  onTick(state: LobbyState): void {}
+  onTick(state: LobbyState): void { }
 
   onEnd(state: LobbyState): void {
     let winners: string[] = [];

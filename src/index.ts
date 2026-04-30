@@ -13,7 +13,9 @@ const server = createServer(app);
 
 const gameServer = new Server({
   transport: new WebSocketTransport({
-    server
+    server,
+    pingInterval: 5000, // 5 seconds
+    pingMaxRetries: 18, // 5s * 18 = 90 seconds before dropping unresponsive client
   })
 });
 
