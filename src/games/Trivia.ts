@@ -9,6 +9,7 @@ export class Trivia implements IMiniGame {
   private currentBatch: any[] = [];
   private currentQuestionIndex: number = 0;
   private isTransitioning: boolean = false;
+  private playerHistory = new Map<string, boolean[]>();
 
   static async ensurePool() {
     if (Trivia.isFetchingPool) return;
@@ -42,6 +43,10 @@ export class Trivia implements IMiniGame {
     if (Trivia.questionPool.length < 3) {
       await Trivia.ensurePool();
     }
+
+    state.selectedPlayers.forEach(id => {
+      this.playerHistory.set(id, []);
+    });
 
     this.currentBatch = Trivia.questionPool.splice(0, 3);
 
@@ -122,6 +127,13 @@ export class Trivia implements IMiniGame {
         this.isTransitioning = true;
         this.broadcastTransitionState(state, player.name, q.correctAnswer);
 
+        this.playerHistory.get(client.sessionId)?.push(true);
+        state.selectedPlayers.forEach(id => {
+          if (id !== client.sessionId) {
+            this.playerHistory.get(id)?.push(false);
+          }
+        });
+
         setTimeout(() => {
           this.isTransitioning = false;
           this.currentQuestionIndex++;
@@ -153,6 +165,10 @@ export class Trivia implements IMiniGame {
         });
 
         if (allLockedOut) {
+          state.selectedPlayers.forEach(id => {
+            this.playerHistory.get(id)?.push(false);
+          });
+          
           // Everyone got it wrong! Skip to the next question immediately
           this.currentQuestionIndex++;
           if (this.currentQuestionIndex >= this.currentBatch.length) {
@@ -208,6 +224,26 @@ export class Trivia implements IMiniGame {
           state.lastLosers.push(id);
         }
       }
+    });
+
+    const timeline = ids.map(id => {
+      const p = state.players.get(id);
+      const history = this.playerHistory.get(id) || [];
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        isWinner: winners.includes(id),
+        events: history.map((success, idx) => ({
+          label: `Q${idx + 1}`,
+          success
+        }))
+      };
+    });
+
+    state.lastGameResult = JSON.stringify({
+      type: "timeline",
+      title: "Trivia Breakdown",
+      timeline
     });
   }
 }

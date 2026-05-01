@@ -21,4 +21,5 @@ export class LobbyState extends Schema {
   @type("number") timer: number = 0; // Universal server clock
   @type(["string"]) lastWinners = new ArraySchema<string>();
   @type(["string"]) lastLosers = new ArraySchema<string>();
+  @type("string") lastGameResult: string = "";
 }

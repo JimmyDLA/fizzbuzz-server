@@ -254,7 +254,7 @@ export class LobbyRoom extends Room {
         break;
       case "Balloon Inflate":
         this.activeGame = new BalloonInflate();
-        this.state.timer = 1000; // Race to pop balloon
+        this.state.timer = 30; // Race to pop balloon
         break;
       default:
         this.activeGame = new TappingRace();

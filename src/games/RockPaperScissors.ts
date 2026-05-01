@@ -160,5 +160,27 @@ export class RockPaperScissors implements IMiniGame {
       const p = state.players.get(id);
       if (p) p.drinks += 1;
     });
+
+    const leaderboard = ids.map(id => {
+      const p = state.players.get(id);
+      const isWinner = state.lastWinners.includes(id);
+      const isLoser = state.lastLosers.includes(id);
+      const pick = this.picks.get(id) || "nothing";
+      
+      let label = isWinner ? "Winner! 👑" : isLoser ? "Defeated 💀" : "Tied 🤝";
+
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreLabel: `${label} (${pick})`,
+        isWinner
+      };
+    }).sort((a, b) => (a.isWinner === b.isWinner ? 0 : a.isWinner ? -1 : 1));
+
+    state.lastGameResult = JSON.stringify({
+      type: "elimination",
+      title: "RPS Results",
+      leaderboard
+    });
   }
 }

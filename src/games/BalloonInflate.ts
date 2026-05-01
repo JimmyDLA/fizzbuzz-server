@@ -138,5 +138,23 @@ export class BalloonInflate implements IMiniGame {
         });
       }
     });
+
+    const leaderboard = results.map(r => {
+      const p = state.players.get(r.id);
+      const isWinner = state.lastWinners.includes(r.id);
+      return {
+        playerId: r.id,
+        playerName: p?.name || "Unknown",
+        scoreValue: r.size,
+        scoreLabel: r.size >= 100 ? "POPPED 💥" : `${r.size}%`,
+        isWinner
+      };
+    }).sort((a, b) => b.scoreValue - a.scoreValue);
+
+    state.lastGameResult = JSON.stringify({
+      type: "leaderboard",
+      title: "Balloon Sizes",
+      leaderboard
+    });
   }
 }
