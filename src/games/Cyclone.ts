@@ -101,5 +101,21 @@ export class Cyclone implements IMiniGame {
         });
       }
     });
+
+    const leaderboard = distances.map(d => {
+      const p = state.players.get(d.id);
+      return {
+        playerId: d.id,
+        playerName: p?.name || "Unknown",
+        scoreLabel: d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE! 🎯" : `Missed by ${d.distance}`,
+        isWinner: state.lastWinners.includes(d.id)
+      };
+    });
+
+    state.lastGameResult = JSON.stringify({
+      type: "leaderboard",
+      title: "Cyclone Precision",
+      leaderboard
+    });
   }
 }

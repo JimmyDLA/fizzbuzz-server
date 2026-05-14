@@ -87,5 +87,22 @@ export class HotPotato implements IMiniGame {
         }
       }
     });
+
+    const leaderboard = selectedArray.map(id => {
+      const p = state.players.get(id);
+      const isWinner = state.lastWinners.includes(id);
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreLabel: isWinner ? "Survived" : "Blew Up 💥",
+        isWinner
+      };
+    }).sort((a, b) => (a.isWinner === b.isWinner ? 0 : a.isWinner ? -1 : 1));
+
+    state.lastGameResult = JSON.stringify({
+      type: "elimination",
+      title: "Potato Explosion",
+      leaderboard
+    });
   }
 }

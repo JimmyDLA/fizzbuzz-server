@@ -68,5 +68,22 @@ export class TappingRace implements IMiniGame {
         state.lastLosers.push(id);
       }
     });
+
+    const leaderboard = ids.map(id => {
+      const p = state.players.get(id);
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreValue: p?.gameScore || 0,
+        scoreLabel: `${p?.gameScore || 0} Taps`,
+        isWinner: winners.includes(id)
+      };
+    }).sort((a, b) => b.scoreValue - a.scoreValue);
+
+    state.lastGameResult = JSON.stringify({
+      type: "leaderboard",
+      title: "Final Tap Counts",
+      leaderboard
+    });
   }
 }

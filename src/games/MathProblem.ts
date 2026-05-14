@@ -56,6 +56,7 @@ export class MathProblem implements IMiniGame {
   private currentQuestionIndex: number = 0;
   private readonly maxQuestions = 3;
   private isTransitioning: boolean = false;
+  private playerHistory = new Map<string, boolean[]>();
 
   onInit(state: LobbyState): void {
     this.currentQuestionIndex = 0;
@@ -82,6 +83,7 @@ export class MathProblem implements IMiniGame {
       if (p) {
         p.gameScore = 0;
         p.gameData = JSON.stringify(gameData);
+        this.playerHistory.set(id, []);
       }
     });
   }
@@ -100,6 +102,13 @@ export class MathProblem implements IMiniGame {
       if (message.answer === pData.correct) {
         p.gameScore += 1;
         this.isTransitioning = true;
+
+        this.playerHistory.get(client.sessionId)?.push(true);
+        state.selectedPlayers.forEach(id => {
+          if (id !== client.sessionId) {
+            this.playerHistory.get(id)?.push(false);
+          }
+        });
 
         state.selectedPlayers.forEach(id => {
           const sp = state.players.get(id);
@@ -168,6 +177,11 @@ export class MathProblem implements IMiniGame {
 
         if (allLockedOut) {
           this.isTransitioning = true;
+          
+          state.selectedPlayers.forEach(id => {
+            this.playerHistory.get(id)?.push(false);
+          });
+
           state.selectedPlayers.forEach(id => {
             const sp = state.players.get(id);
             if (sp) {
@@ -261,6 +275,26 @@ export class MathProblem implements IMiniGame {
           state.lastLosers.push(id);
         }
       }
+    });
+
+    const timeline = ids.map(id => {
+      const p = state.players.get(id);
+      const history = this.playerHistory.get(id) || [];
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        isWinner: winners.includes(id),
+        events: history.map((success, idx) => ({
+          label: `Q${idx + 1}`,
+          success
+        }))
+      };
+    });
+
+    state.lastGameResult = JSON.stringify({
+      type: "timeline",
+      title: "Math Breakdown",
+      timeline
     });
   }
 }
