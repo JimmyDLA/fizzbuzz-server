@@ -46,6 +46,8 @@ export class Trivia implements IMiniGame {
 
     state.selectedPlayers.forEach(id => {
       this.playerHistory.set(id, []);
+      const p = state.players.get(id);
+      if (p) p.gameScore = 0;
     });
 
     this.currentBatch = Trivia.questionPool.splice(0, 3);
