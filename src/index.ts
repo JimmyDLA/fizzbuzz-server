@@ -4,6 +4,7 @@ import { createServer } from "http";
 import express from "express";
 import cors from "cors";
 import { LobbyRoom } from "./rooms/LobbyRoom";
+import { PracticeRoom } from "./rooms/PracticeRoom";
 
 const app = express();
 app.use(cors());
@@ -20,6 +21,7 @@ const gameServer = new Server({
 });
 
 gameServer.define("lobby", LobbyRoom);
+gameServer.define("practice_room", PracticeRoom);
 
 const port = Number(process.env.PORT) || 2567;
 gameServer.listen(port).then(() => {
