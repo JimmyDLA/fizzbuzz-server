@@ -70,22 +70,56 @@ export class Cyclone implements IMiniGame {
 
     distances.sort((a, b) => a.distance - b.distance);
 
+    const is2v2 = state.currentGameType === "2v2" && state.selectedPlayers.length === 4;
+    const ids = state.selectedPlayers.toArray();
+
+    const getDist = (id: string) => distances.find(d => d.id === id)?.distance ?? 999;
+    const t1Score = is2v2 ? getDist(ids[0]) + getDist(ids[1]) : 0;
+    const t2Score = is2v2 ? getDist(ids[2]) + getDist(ids[3]) : 0;
+
     if (distances.length > 0) {
-      const bestDist = distances[0].distance;
-      const winners = bestDist === 999 ? [] : distances.filter(d => d.distance === bestDist);
-      const losers = bestDist === 999 ? distances : distances.filter(d => d.distance !== bestDist);
+      if (is2v2) {
+        let winners: string[] = [];
+        let losers: string[] = [];
+        
+        if (t1Score < 1998 || t2Score < 1998) {
+          if (t1Score <= t2Score) winners.push(ids[0], ids[1]);
+          else losers.push(ids[0], ids[1]);
+          
+          if (t2Score <= t1Score) winners.push(ids[2], ids[3]);
+          else losers.push(ids[2], ids[3]);
+        } else {
+          losers.push(...ids);
+        }
 
-      winners.forEach(w => {
-        state.lastWinners.push(w.id);
-        const p = state.players.get(w.id);
-        if (p) p.score += 3;
-      });
+        winners.forEach(id => {
+          state.lastWinners.push(id);
+          const p = state.players.get(id);
+          if (p) p.score += 3;
+        });
 
-      losers.forEach(l => {
-        state.lastLosers.push(l.id);
-        const p = state.players.get(l.id);
-        if (p) p.drinks += 1;
-      });
+        losers.forEach(id => {
+          state.lastLosers.push(id);
+          const p = state.players.get(id);
+          if (p) p.drinks += 1;
+        });
+      } else {
+        const bestDist = distances[0].distance;
+        const winners = bestDist === 999 ? [] : distances.filter(d => d.distance === bestDist);
+        const losers = bestDist === 999 ? distances : distances.filter(d => d.distance !== bestDist);
+
+        winners.forEach(w => {
+          state.lastWinners.push(w.id);
+          const p = state.players.get(w.id);
+          if (p) p.score += 3;
+        });
+
+        losers.forEach(l => {
+          state.lastLosers.push(l.id);
+          const p = state.players.get(l.id);
+          if (p) p.drinks += 1;
+        });
+      }
     }
 
     // Attach results locally so the UI can draw exactly who won and how close everyone was
@@ -104,13 +138,32 @@ export class Cyclone implements IMiniGame {
 
     const leaderboard = distances.map(d => {
       const p = state.players.get(d.id);
+      let scoreLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE! 🎯" : `Missed by ${d.distance}`;
+      let scoreValue = d.distance;
+
+      if (is2v2) {
+        const isTeam1 = d.id === ids[0] || d.id === ids[1];
+        const teamScore = isTeam1 ? t1Score : t2Score;
+        scoreValue = teamScore;
+        const indLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE! 🎯" : `Missed by ${d.distance}`;
+        
+        if (teamScore >= 1998) {
+          scoreLabel = `Team Timeout (${indLabel} ind.)`;
+        } else if (teamScore === 0) {
+          scoreLabel = `TEAM BULLSEYE! 🎯 (${indLabel} ind.)`;
+        } else {
+          scoreLabel = `Missed by ${teamScore} total (${indLabel} ind.)`;
+        }
+      }
+
       return {
         playerId: d.id,
         playerName: p?.name || "Unknown",
-        scoreLabel: d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE! 🎯" : `Missed by ${d.distance}`,
+        scoreValue: -scoreValue, // Lower distance is better, so negate it for sorting
+        scoreLabel,
         isWinner: state.lastWinners.includes(d.id)
       };
-    });
+    }).sort((a, b) => b.scoreValue - a.scoreValue);
 
     state.lastGameResult = JSON.stringify({
       type: "leaderboard",

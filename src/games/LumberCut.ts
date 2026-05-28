@@ -115,15 +115,19 @@ export class LumberCut implements IMiniGame {
       }
     });
 
+    const is2v2 = state.currentGameType === "2v2" && state.selectedPlayers.length === 4;
+
     const leaderboard = state.selectedPlayers.toArray().map(id => {
       const p = state.players.get(id);
       const team = gameData.teams?.find((t: any) => t.members.includes(id));
       const pairs = team ? team.pairs : 0;
+      const scoreLabel = is2v2 ? `${pairs} Team Logs Cut` : `${pairs} Logs Cut`;
+      
       return {
         playerId: id,
         playerName: p?.name || "Unknown",
         scoreValue: pairs,
-        scoreLabel: `${pairs} Logs Cut`,
+        scoreLabel,
         isWinner: state.lastWinners.includes(id)
       };
     }).sort((a, b) => b.scoreValue - a.scoreValue);

@@ -81,47 +81,100 @@ export class BalloonInflate implements IMiniGame {
 
     let timeoutWinners: string[] = [];
 
+    const is2v2 = state.currentGameType === "2v2" && state.selectedPlayers.length === 4;
+    const ids = state.selectedPlayers.toArray();
+
     if (this.winnerId) {
       // Early burst win
-      state.lastWinners.push(this.winnerId);
-      const p = state.players.get(this.winnerId);
-      if (p) p.score += 3;
-
-      results.forEach(l => {
-        if (l.id !== this.winnerId) {
-          state.lastLosers.push(l.id);
-          const loserP = state.players.get(l.id);
-          if (loserP) loserP.drinks += 1;
-        }
-      });
-    } else {
-      // Timeout win logic (biggest sizes win)
-      results.sort((a, b) => b.size - a.size);
-      const max = results[0].size;
-
-      if (max > 0) {
-        const winners = results.filter(r => r.size === max);
-        const losers = results.filter(r => r.size !== max);
+      if (is2v2) {
+        const isTeam1 = this.winnerId === ids[0] || this.winnerId === ids[1];
+        const winners = isTeam1 ? [ids[0], ids[1]] : [ids[2], ids[3]];
+        const losers = isTeam1 ? [ids[2], ids[3]] : [ids[0], ids[1]];
 
         winners.forEach(w => {
-          state.lastWinners.push(w.id);
-          timeoutWinners.push(w.id);
-          const p = state.players.get(w.id);
+          state.lastWinners.push(w);
+          timeoutWinners.push(w);
+          const p = state.players.get(w);
           if (p) p.score += 3;
         });
 
         losers.forEach(l => {
-          state.lastLosers.push(l.id);
-          const p = state.players.get(l.id);
+          state.lastLosers.push(l);
+          const p = state.players.get(l);
           if (p) p.drinks += 1;
         });
       } else {
-        // Nobody pumped
+        state.lastWinners.push(this.winnerId);
+        const p = state.players.get(this.winnerId);
+        if (p) p.score += 3;
+
         results.forEach(l => {
-          state.lastLosers.push(l.id);
-          const p = state.players.get(l.id);
-          if (p) p.drinks += 1;
+          if (l.id !== this.winnerId) {
+            state.lastLosers.push(l.id);
+            const loserP = state.players.get(l.id);
+            if (loserP) loserP.drinks += 1;
+          }
         });
+      }
+    } else {
+      // Timeout win logic (biggest sizes win)
+      if (is2v2) {
+        const getSize = (id: string) => results.find(r => r.id === id)?.size || 0;
+        const t1Score = getSize(ids[0]) + getSize(ids[1]);
+        const t2Score = getSize(ids[2]) + getSize(ids[3]);
+
+        if (t1Score > 0 || t2Score > 0) {
+          const winners = t1Score > t2Score ? [ids[0], ids[1]] : t2Score > t1Score ? [ids[2], ids[3]] : [...ids];
+          const losers = t1Score > t2Score ? [ids[2], ids[3]] : t2Score > t1Score ? [ids[0], ids[1]] : [];
+
+          winners.forEach(w => {
+            state.lastWinners.push(w);
+            timeoutWinners.push(w);
+            const p = state.players.get(w);
+            if (p) p.score += 3;
+          });
+
+          losers.forEach(l => {
+            state.lastLosers.push(l);
+            const p = state.players.get(l);
+            if (p) p.drinks += 1;
+          });
+        } else {
+          // Nobody pumped
+          ids.forEach(l => {
+            state.lastLosers.push(l);
+            const p = state.players.get(l);
+            if (p) p.drinks += 1;
+          });
+        }
+      } else {
+        results.sort((a, b) => b.size - a.size);
+        const max = results[0].size;
+
+        if (max > 0) {
+          const winners = results.filter(r => r.size === max);
+          const losers = results.filter(r => r.size !== max);
+
+          winners.forEach(w => {
+            state.lastWinners.push(w.id);
+            timeoutWinners.push(w.id);
+            const p = state.players.get(w.id);
+            if (p) p.score += 3;
+          });
+
+          losers.forEach(l => {
+            state.lastLosers.push(l.id);
+            const p = state.players.get(l.id);
+            if (p) p.drinks += 1;
+          });
+        } else {
+          // Nobody pumped
+          results.forEach(l => {
+            state.lastLosers.push(l.id);
+            const p = state.players.get(l.id);
+            if (p) p.drinks += 1;
+          });
+        }
       }
     }
 
@@ -142,11 +195,23 @@ export class BalloonInflate implements IMiniGame {
     const leaderboard = results.map(r => {
       const p = state.players.get(r.id);
       const isWinner = state.lastWinners.includes(r.id);
+      let scoreValue = r.size;
+      let scoreLabel = r.size >= 100 ? "POPPED 💥" : `${r.size}%`;
+
+      if (is2v2) {
+        const isTeam1 = r.id === ids[0] || r.id === ids[1];
+        const getSize = (id: string) => results.find(res => res.id === id)?.size || 0;
+        const teamScore = isTeam1 ? getSize(ids[0]) + getSize(ids[1]) : getSize(ids[2]) + getSize(ids[3]);
+        scoreValue = teamScore;
+        const indLabel = r.size >= 100 ? "POPPED 💥" : `${r.size}%`;
+        scoreLabel = teamScore >= 100 ? "POPPED 💥" : `${teamScore}% Team Total (${indLabel} ind.)`;
+      }
+
       return {
         playerId: r.id,
         playerName: p?.name || "Unknown",
-        scoreValue: r.size,
-        scoreLabel: r.size >= 100 ? "POPPED 💥" : `${r.size}%`,
+        scoreValue,
+        scoreLabel,
         isWinner
       };
     }).sort((a, b) => b.scoreValue - a.scoreValue);
