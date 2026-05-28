@@ -69,13 +69,27 @@ export class TappingRace implements IMiniGame {
       }
     });
 
+    const is2v2 = state.currentGameType === "2v2" && ids.length === 4;
+    const t1Score = is2v2 ? (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0) : 0;
+    const t2Score = is2v2 ? (state.players.get(ids[2])?.gameScore || 0) + (state.players.get(ids[3])?.gameScore || 0) : 0;
+
     const leaderboard = ids.map(id => {
       const p = state.players.get(id);
+      let scoreValue = p?.gameScore || 0;
+      let scoreLabel = `${scoreValue} Taps`;
+
+      if (is2v2) {
+        const isTeam1 = id === ids[0] || id === ids[1];
+        const teamScore = isTeam1 ? t1Score : t2Score;
+        scoreValue = teamScore;
+        scoreLabel = `${teamScore} Team Taps (${p?.gameScore || 0} Individually)`;
+      }
+
       return {
         playerId: id,
         playerName: p?.name || "Unknown",
-        scoreValue: p?.gameScore || 0,
-        scoreLabel: `${p?.gameScore || 0} Taps`,
+        scoreValue,
+        scoreLabel,
         isWinner: winners.includes(id)
       };
     }).sort((a, b) => b.scoreValue - a.scoreValue);
