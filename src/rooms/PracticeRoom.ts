@@ -10,6 +10,7 @@ import { RockPaperScissors } from "../games/RockPaperScissors";
 import { Cyclone } from "../games/Cyclone";
 import { BalloonInflate } from "../games/BalloonInflate";
 import { SimonSays } from "../games/SimonSays";
+import { Scrabble } from "../games/Scrabble";
 
 export class PracticeRoom extends Room {
   state!: LobbyState;
@@ -71,6 +72,7 @@ export class PracticeRoom extends Room {
       case "Cyclone": this.activeGame = new Cyclone(); break;
       case "Balloon Inflate": this.activeGame = new BalloonInflate(); break;
       case "Simon Says": this.activeGame = new SimonSays(); break;
+      case "Scrabble": this.activeGame = new Scrabble(); break;
       default: this.activeGame = new TappingRace(); break;
     }
   }
