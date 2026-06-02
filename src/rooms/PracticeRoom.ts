@@ -49,7 +49,6 @@ export class PracticeRoom extends Room {
     if (this.activeGame) {
       this.activeGame.onInit(this.state);
     }
-    this.startGameLoop();
   }
 
   onLeave(client: Client, code?: number) {
@@ -75,25 +74,5 @@ export class PracticeRoom extends Room {
       case "Scrabble": this.activeGame = new Scrabble(); break;
       default: this.activeGame = new TappingRace(); break;
     }
-  }
-
-  startGameLoop() {
-    if (this.gameLoopInterval) clearInterval(this.gameLoopInterval);
-
-    this.gameLoopInterval = setInterval(() => {
-      if (this.state.phase === "playing") {
-        if (this.state.timer > 0) {
-          this.state.timer--;
-          if (this.activeGame && this.activeGame.onTick) {
-            this.activeGame.onTick(this.state);
-          }
-        } else {
-          this.state.phase = "resolution";
-          if (this.activeGame) {
-            this.activeGame.onEnd(this.state);
-          }
-        }
-      }
-    }, 1000);
   }
 }
