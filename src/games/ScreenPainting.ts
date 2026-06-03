@@ -23,16 +23,12 @@ export class ScreenPainting implements IMiniGame {
       if (!state.selectedPlayers.includes(client.sessionId)) return;
 
       this.winnerId = client.sessionId;
-      const p = state.players.get(client.sessionId);
-      if (p) {
-        p.gameScore = 100;
-        p.gameData = JSON.stringify({ finished: true });
-      }
 
-      // Broadcast to others that someone finished
+      // Update all selected players' game data to mark game as finished and specify the winner
       state.selectedPlayers.forEach(id => {
          const player = state.players.get(id);
-         if (player && id !== client.sessionId) {
+         if (player) {
+            player.gameScore = id === client.sessionId ? 100 : 0;
             player.gameData = JSON.stringify({ finished: true, winnerId: client.sessionId });
          }
       });
@@ -70,5 +66,24 @@ export class ScreenPainting implements IMiniGame {
         if (p) p.drinks += 1;
       });
     }
+
+    // Set leaderboard data for the resolution / results screen
+    const leaderboard = state.selectedPlayers.toArray().map(id => {
+      const p = state.players.get(id);
+      const isWinner = id === this.winnerId;
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreValue: isWinner ? 1 : 0,
+        scoreLabel: isWinner ? "Finished 1st!" : "Still Painting",
+        isWinner
+      };
+    }).sort((a, b) => b.scoreValue - a.scoreValue);
+
+    state.lastGameResult = JSON.stringify({
+      type: "leaderboard",
+      title: "Painting Race Results",
+      leaderboard
+    });
   }
 }
