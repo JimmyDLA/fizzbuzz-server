@@ -20,6 +20,7 @@ export class LobbyRoom extends Room {
   maxClients = 8;
   gameLoopInterval: any;
   activeGame: IMiniGame | null = null;
+  private disconnectedPlayersCache = new Map<string, { score: number, drinks: number }>();
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -29,7 +30,7 @@ export class LobbyRoom extends Room {
 
     let isTaken = false;
     this.state.players.forEach((p) => {
-      if (p.name.toLowerCase() === requestedName.toLowerCase()) {
+      if (p.name.toLowerCase() === requestedName.toLowerCase() && p.isConnected) {
         isTaken = true;
       }
     });
@@ -76,11 +77,50 @@ export class LobbyRoom extends Room {
 
   onJoin(client: Client, options?: any) {
     console.log(client.sessionId, "joined!");
+    const requestedName = options?.name || `Player ${this.clients.length}`;
+    const nameLower = requestedName.toLowerCase();
+
+    // Check if there is an existing disconnected player with the SAME name in the active state
+    // (This happens if they crashed abnormally and joined with a new session instead of reconnect token)
+    let existingPlayerId: string | null = null;
+    this.state.players.forEach((p, id) => {
+      if (p.name.toLowerCase() === nameLower && !p.isConnected) {
+        existingPlayerId = id;
+      }
+    });
+
     const player = new Player();
     player.id = client.sessionId;
-    player.name = options?.name || `Player ${this.clients.length}`;
+    player.name = requestedName;
 
-    if (this.clients.length === 1) {
+    if (existingPlayerId) {
+      // Inherit stats from the active disconnected player object
+      const oldPlayer = this.state.players.get(existingPlayerId);
+      if (oldPlayer) {
+        player.score = oldPlayer.score;
+        player.drinks = oldPlayer.drinks;
+        player.isHost = oldPlayer.isHost;
+      }
+      // Remove the old player object
+      this.state.players.delete(existingPlayerId);
+      console.log(`[Rejoin] ${player.name} rejoined from active disconnected session.`);
+    } else if (this.disconnectedPlayersCache.has(nameLower)) {
+      // Inherit stats from cache
+      const cached = this.disconnectedPlayersCache.get(nameLower);
+      if (cached) {
+        player.score = cached.score;
+        player.drinks = cached.drinks;
+      }
+      this.disconnectedPlayersCache.delete(nameLower);
+      console.log(`[Rejoin] ${player.name} rejoined from offline cache.`);
+    }
+
+    // Resolve host status: if no host exists in the lobby, make this player host
+    let hostExists = false;
+    this.state.players.forEach(p => {
+      if (p.isHost) hostExists = true;
+    });
+    if (!hostExists && this.state.players.size === 0) {
       player.isHost = true;
     }
 
@@ -93,6 +133,11 @@ export class LobbyRoom extends Room {
 
     if (consented) {
       console.log(client.sessionId, "consented leave.");
+      // Save stats to cache
+      this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
+        score: player.score,
+        drinks: player.drinks
+      });
       this.removePlayer(client.sessionId);
     } else {
       console.log(client.sessionId, "abnormal leave! Waiting 120s...");
@@ -104,6 +149,11 @@ export class LobbyRoom extends Room {
         player.isConnected = true;
       } catch (e) {
         console.log(client.sessionId, "grace period expired!");
+        // Save stats to cache
+        this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
+          score: player.score,
+          drinks: player.drinks
+        });
         this.removePlayer(client.sessionId);
       }
     }
