@@ -116,7 +116,7 @@ export class Perfection implements IMiniGame {
         playerId: id,
         playerName: p?.name || "Unknown",
         scoreValue: score,
-        scoreLabel: `${score}/16 Shapes Matched`,
+        scoreLabel: `${score} Matched`,
         isWinner: winners.includes(id)
       };
     }).sort((a, b) => b.scoreValue - a.scoreValue);
