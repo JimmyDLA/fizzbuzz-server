@@ -11,9 +11,11 @@ import { Cyclone } from "../games/Cyclone";
 import { BalloonInflate } from "../games/BalloonInflate";
 import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
+import { ScreenPainting } from "../games/ScreenPainting";
+import { Perfection } from "../games/Perfection";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
-const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble"];
+const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
 
 export class LobbyRoom extends Room {
   state!: LobbyState;
@@ -209,7 +211,7 @@ export class LobbyRoom extends Room {
     this.state.currentCategory = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
 
     // Enforce Category Restrictions
-    if (this.state.currentCategory === "Rock Paper Scissors" || this.state.currentCategory === "Simon Says") {
+    if (this.state.currentCategory === "Rock Paper Scissors" || this.state.currentCategory === "Simon Says" || this.state.currentCategory === "Perfection") {
       if (this.state.currentGameType === "2v2") this.state.currentGameType = "1v1";
     } else if (this.state.currentCategory === "Hot Potato" && this.state.currentGameType === "2v2") {
       this.state.currentGameType = "1v1"; // Fallback from 2v2 for Hot Potato
@@ -315,6 +317,14 @@ export class LobbyRoom extends Room {
       case "Scrabble":
         this.activeGame = new Scrabble();
         this.state.timer = 45; // Generous time for forming words
+        break;
+      case "Screen Painting":
+        this.activeGame = new ScreenPainting();
+        this.state.timer = 25; // Race against time
+        break;
+      case "Perfection":
+        this.activeGame = new Perfection();
+        this.state.timer = 40; // Race against time
         break;
       default:
         this.activeGame = new TappingRace();
