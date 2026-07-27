@@ -23,12 +23,34 @@ export class Trivia implements IMiniGame {
       }
     } catch (error) {
       console.error("Failed to fetch trivia questions:", error);
-      if (Trivia.questionPool.length === 0) {
-        Trivia.questionPool.push({
-          question: { text: "What is the capital of France?" },
-          correctAnswer: "Paris",
-          incorrectAnswers: ["London", "Berlin", "Rome"]
-        });
+      if (Trivia.questionPool.length < 5) {
+        Trivia.questionPool.push(
+          {
+            question: { text: "What is the capital of France?" },
+            correctAnswer: "Paris",
+            incorrectAnswers: ["London", "Berlin", "Rome"]
+          },
+          {
+            question: { text: "Which planet is known as the Red Planet?" },
+            correctAnswer: "Mars",
+            incorrectAnswers: ["Earth", "Jupiter", "Venus"]
+          },
+          {
+            question: { text: "Who wrote 'Romeo and Juliet'?" },
+            correctAnswer: "William Shakespeare",
+            incorrectAnswers: ["Jane Austen", "Charles Dickens", "Mark Twain"]
+          },
+          {
+            question: { text: "What is the largest ocean on Earth?" },
+            correctAnswer: "Pacific Ocean",
+            incorrectAnswers: ["Atlantic Ocean", "Indian Ocean", "Arctic Ocean"]
+          },
+          {
+            question: { text: "How many bones are there in an adult human body?" },
+            correctAnswer: "206",
+            incorrectAnswers: ["208", "210", "212"]
+          }
+        );
       }
     } finally {
       Trivia.isFetchingPool = false;
@@ -40,7 +62,7 @@ export class Trivia implements IMiniGame {
   }
 
   private async initializeGame(state: LobbyState) {
-    if (Trivia.questionPool.length < 3) {
+    if (Trivia.questionPool.length < 5) {
       await Trivia.ensurePool();
     }
 
@@ -50,9 +72,9 @@ export class Trivia implements IMiniGame {
       if (p) p.gameScore = 0;
     });
 
-    this.currentBatch = Trivia.questionPool.splice(0, 3);
+    this.currentBatch = Trivia.questionPool.splice(0, 5);
 
-    if (Trivia.questionPool.length <= 1) {
+    if (Trivia.questionPool.length <= 2) {
       Trivia.ensurePool();
     }
 
@@ -167,17 +189,23 @@ export class Trivia implements IMiniGame {
         });
 
         if (allLockedOut) {
+          this.isTransitioning = true;
+          this.broadcastTransitionState(state, "Nobody", q.correctAnswer);
+
           state.selectedPlayers.forEach(id => {
             this.playerHistory.get(id)?.push(false);
           });
           
-          // Everyone got it wrong! Skip to the next question immediately
-          this.currentQuestionIndex++;
-          if (this.currentQuestionIndex >= this.currentBatch.length) {
-            state.timer = 0; // Force end the game loop immediately
-          } else {
-            this.broadcastState(state);
-          }
+          setTimeout(() => {
+            this.isTransitioning = false;
+            this.currentQuestionIndex++;
+
+            if (this.currentQuestionIndex >= this.currentBatch.length) {
+              state.timer = 0; // Force end the game loop immediately
+            } else {
+              this.broadcastState(state);
+            }
+          }, 3000);
         }
       }
     }

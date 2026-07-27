@@ -281,12 +281,18 @@ export class LobbyRoom extends Room {
     this.state.phase = "playing";
     this.state.timer = 20;
 
+    // Reset player gameData to prevent stale state propagation from previous rounds
+    this.state.players.forEach(p => {
+      p.gameData = "{}";
+    });
+
     switch (this.state.currentCategory) {
       case "Tapping Race":
         this.activeGame = new TappingRace();
         break;
       case "Math Problem":
         this.activeGame = new MathProblem();
+        this.state.timer = 35; // Generous time for solving math problems
         break;
       case "Hot Potato":
         this.activeGame = new HotPotato();
@@ -296,7 +302,7 @@ export class LobbyRoom extends Room {
         break;
       case "Trivia":
         this.activeGame = new Trivia();
-        this.state.timer = 45; // 3 questions
+        this.state.timer = 60; // 5 questions
         break;
       case "Rock Paper Scissors":
         this.activeGame = new RockPaperScissors();

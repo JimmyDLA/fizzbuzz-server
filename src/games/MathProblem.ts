@@ -54,7 +54,7 @@ const generateMathProblem = () => {
 
 export class MathProblem implements IMiniGame {
   private currentQuestionIndex: number = 0;
-  private readonly maxQuestions = 3;
+  private readonly maxQuestions = 5;
   private isTransitioning: boolean = false;
   private playerHistory = new Map<string, boolean[]>();
 
@@ -75,6 +75,7 @@ export class MathProblem implements IMiniGame {
       correctAnswer: puz.correct,
       index: this.currentQuestionIndex,
       wrongAnswers: [] as number[],
+      totalQuestions: this.maxQuestions,
     };
 
     // Seed the identical localized puzzle to all clients efficiently
