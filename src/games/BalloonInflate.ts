@@ -37,7 +37,7 @@ export class BalloonInflate implements IMiniGame {
         currentSize = TARGET_SIZE;
         this.winnerId = client.sessionId;
         this.isEnded = true;
-        state.timer = 1; // Instant transition to end
+        state.timer = 4; // 3-second delay for confetti animation before game ends
       }
 
       this.balloonSizes.set(client.sessionId, currentSize);
