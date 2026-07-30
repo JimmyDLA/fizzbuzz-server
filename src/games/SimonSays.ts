@@ -84,8 +84,12 @@ export class SimonSays implements IMiniGame {
         const isMultiplayer = state.selectedPlayers.length > 1;
         if (gameData.activePlayers.length === 0) {
           gameData.isGameOver = true;
-          // Tie between all players who started the current round active
-          gameData.winners = isMultiplayer ? (gameData.roundStartActivePlayers || []) : [];
+          // Tie between all players who started the current round active, unless it's round 1 (nobody completed round 1)
+          if (gameData.currentRound === 1) {
+            gameData.winners = [];
+          } else {
+            gameData.winners = isMultiplayer ? (gameData.roundStartActivePlayers || []) : [];
+          }
           state.timer = 0;
         }
         // Note: we do NOT end the game if gameData.activePlayers.length === 1.
@@ -143,7 +147,11 @@ export class SimonSays implements IMiniGame {
       if (gameData.activePlayers.length === 0) {
         state.timer = 0; // Trigger onEnd natively
         gameData.isGameOver = true;
-        gameData.winners = isMultiplayer ? (gameData.roundStartActivePlayers || []) : [];
+        if (gameData.currentRound === 1) {
+          gameData.winners = [];
+        } else {
+          gameData.winners = isMultiplayer ? (gameData.roundStartActivePlayers || []) : [];
+        }
       } else if (isMultiplayer && gameData.activePlayers.length === 1) {
         // Since B completed it correctly (not in newlyFailed) and is the last active player, they win!
         state.timer = 0;

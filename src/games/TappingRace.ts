@@ -32,13 +32,13 @@ export class TappingRace implements IMiniGame {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
       const t2Score = (state.players.get(ids[2])?.gameScore || 0) + (state.players.get(ids[3])?.gameScore || 0);
 
-      if (t1Score >= t2Score) winners.push(ids[0], ids[1]);
-      if (t2Score >= t1Score) winners.push(ids[2], ids[3]);
+      if (t1Score >= t2Score && t1Score > 0) winners.push(ids[0], ids[1]);
+      if (t2Score >= t1Score && t2Score > 0) winners.push(ids[2], ids[3]);
     } else {
-      let maxScore = -1;
+      let maxScore = 0;
       ids.forEach(id => {
         const p = state.players.get(id);
-        if (p) {
+        if (p && p.gameScore > 0) {
           if (p.gameScore > maxScore) {
             maxScore = p.gameScore;
             winners = [id];

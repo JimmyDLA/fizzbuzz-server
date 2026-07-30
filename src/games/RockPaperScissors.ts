@@ -174,12 +174,15 @@ export class RockPaperScissors implements IMiniGame {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    if (score1 > score2) {
+    if (score1 > score2 && score1 > 0) {
       state.lastWinners.push(p1Id);
       state.lastLosers.push(p2Id);
-    } else if (score2 > score1) {
+    } else if (score2 > score1 && score2 > 0) {
       state.lastWinners.push(p2Id);
       state.lastLosers.push(p1Id);
+    } else {
+      // Tied or nobody scored (both score 0) -> Both are losers!
+      state.lastLosers.push(p1Id, p2Id);
     }
 
     state.lastWinners.forEach(id => {

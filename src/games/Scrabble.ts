@@ -95,9 +95,10 @@ export class Scrabble implements IMiniGame {
     if (is2v2) {
       const t1Score = getScore(ids[0]) + getScore(ids[1]);
       const t2Score = getScore(ids[2]) + getScore(ids[3]);
-      if (t1Score > t2Score) winners = [ids[0], ids[1]];
-      else if (t2Score > t1Score) winners = [ids[2], ids[3]];
-      else winners = [...ids]; // Tie
+      if (t1Score > t2Score && t1Score > 0) winners = [ids[0], ids[1]];
+      else if (t2Score > t1Score && t2Score > 0) winners = [ids[2], ids[3]];
+      else if (t1Score === t2Score && t1Score > 0) winners = [...ids]; // Tie with points
+      else winners = []; // Nobody found words -> everyone loses!
     } else {
       let maxScore = -1;
       ids.forEach(id => {

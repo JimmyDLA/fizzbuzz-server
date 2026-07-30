@@ -115,18 +115,19 @@ export class LumberCut implements IMiniGame {
       }
     });
 
-    const is2v2 = state.currentGameType === "2v2" && state.selectedPlayers.length === 4;
+    const target = gameData.targetPairs || 20;
 
     const leaderboard = state.selectedPlayers.toArray().map(id => {
       const p = state.players.get(id);
       const team = gameData.teams?.find((t: any) => t.members.includes(id));
       const pairs = team ? team.pairs : 0;
-      const scoreLabel = is2v2 ? `${pairs} Team Logs Cut` : `${pairs} Logs Cut`;
+      const percent = Math.min(100, Math.round((pairs / target) * 100));
+      const scoreLabel = `${percent}% Cut`;
       
       return {
         playerId: id,
         playerName: p?.name || "Unknown",
-        scoreValue: pairs,
+        scoreValue: percent,
         scoreLabel,
         isWinner: state.lastWinners.includes(id)
       };
@@ -134,7 +135,7 @@ export class LumberCut implements IMiniGame {
 
     state.lastGameResult = JSON.stringify({
       type: "leaderboard",
-      title: "Logs Cut",
+      title: "Lumber Cut Results",
       leaderboard
     });
   }
