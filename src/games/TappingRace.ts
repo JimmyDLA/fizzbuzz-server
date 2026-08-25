@@ -15,7 +15,14 @@ export class TappingRace implements IMiniGame {
     if (message.action === "tap") {
       const p = state.players.get(client.sessionId);
       if (p && state.selectedPlayers.includes(client.sessionId)) {
-        p.gameScore += 1;
+        let inc = 1;
+        if (p.activeEffects) {
+          try {
+            const fx = JSON.parse(p.activeEffects);
+            if (fx.turbo) inc = 1.5;
+          } catch (e) {}
+        }
+        p.gameScore += inc;
       }
     }
   }

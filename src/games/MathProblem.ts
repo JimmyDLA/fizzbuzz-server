@@ -239,6 +239,19 @@ export class MathProblem implements IMiniGame {
     let winners: string[] = [];
     const ids = state.selectedPlayers.toArray();
 
+    // Apply Turbo effect (+1 extra point at the end)
+    ids.forEach(id => {
+      const p = state.players.get(id);
+      if (p && p.activeEffects) {
+        try {
+          const fx = JSON.parse(p.activeEffects);
+          if (fx.turbo) {
+            p.gameScore += 1;
+          }
+        } catch (e) {}
+      }
+    });
+
     if (state.currentGameType === "2v2" && ids.length === 4) {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
       const t2Score = (state.players.get(ids[2])?.gameScore || 0) + (state.players.get(ids[3])?.gameScore || 0);

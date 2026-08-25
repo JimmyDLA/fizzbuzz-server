@@ -58,7 +58,14 @@ export class LumberCut implements IMiniGame {
         team.next = message.side === 'left' ? 'right' : 'left';
         if (message.side === 'right') { 
           // Reaching the right pull concludes a cohesive cross-cut sequence
-          team.pairs++;
+          let inc = 1;
+          if (p.activeEffects) {
+            try {
+              const fx = JSON.parse(p.activeEffects);
+              if (fx.turbo) inc = 1.5;
+            } catch (e) {}
+          }
+          team.pairs += inc;
         }
 
         if (team.pairs >= gameData.targetPairs) {

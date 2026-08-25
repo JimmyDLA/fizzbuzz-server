@@ -70,7 +70,16 @@ export class Scrabble implements IMiniGame {
 
         // Add points based on length
         const p = state.players.get(id);
-        if (p) p.gameScore += word.length;
+        if (p) {
+          let pts = word.length;
+          if (p.activeEffects) {
+            try {
+              const fx = JSON.parse(p.activeEffects);
+              if (fx.turbo) pts = Math.round(pts * 1.5);
+            } catch (e) {}
+          }
+          p.gameScore += pts;
+        }
 
         this.syncGameData(state, gameData);
       }

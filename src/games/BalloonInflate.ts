@@ -31,7 +31,15 @@ export class BalloonInflate implements IMiniGame {
 
     if (message.action === "pump") {
       let currentSize = this.balloonSizes.get(client.sessionId) || 0;
-      currentSize += PUMP_AMOUNT;
+      let pump = PUMP_AMOUNT;
+      const p = state.players.get(client.sessionId);
+      if (p && p.activeEffects) {
+        try {
+          const fx = JSON.parse(p.activeEffects);
+          if (fx.turbo) pump = Math.round(PUMP_AMOUNT * 1.5);
+        } catch (e) {}
+      }
+      currentSize += pump;
 
       if (currentSize >= TARGET_SIZE) {
         currentSize = TARGET_SIZE;
