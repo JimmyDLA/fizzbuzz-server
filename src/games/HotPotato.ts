@@ -94,7 +94,7 @@ export class HotPotato implements IMiniGame {
       return {
         playerId: id,
         playerName: p?.name || "Unknown",
-        scoreLabel: isWinner ? "Survived" : "Blew Up 💥",
+        scoreLabel: isWinner ? "Survived" : "Blew Up",
         isWinner
       };
     }).sort((a, b) => (a.isWinner === b.isWinner ? 0 : a.isWinner ? -1 : 1));

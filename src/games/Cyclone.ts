@@ -138,19 +138,19 @@ export class Cyclone implements IMiniGame {
 
     const leaderboard = distances.map(d => {
       const p = state.players.get(d.id);
-      let scoreLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE! 🎯" : `Missed by ${d.distance}`;
+      let scoreLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE!" : `Missed by ${d.distance}`;
       let scoreValue = d.distance;
 
       if (is2v2) {
         const isTeam1 = d.id === ids[0] || d.id === ids[1];
         const teamScore = isTeam1 ? t1Score : t2Score;
         scoreValue = teamScore;
-        const indLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE! 🎯" : `Missed by ${d.distance}`;
+        const indLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE!" : `Missed by ${d.distance}`;
         
         if (teamScore >= 1998) {
           scoreLabel = `Team Timeout (${indLabel} ind.)`;
         } else if (teamScore === 0) {
-          scoreLabel = `TEAM BULLSEYE! 🎯 (${indLabel} ind.)`;
+          scoreLabel = `TEAM BULLSEYE! (${indLabel} ind.)`;
         } else {
           scoreLabel = `Missed by ${teamScore} total (${indLabel} ind.)`;
         }

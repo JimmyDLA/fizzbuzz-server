@@ -204,15 +204,15 @@ export class BalloonInflate implements IMiniGame {
       const p = state.players.get(r.id);
       const isWinner = state.lastWinners.includes(r.id);
       let scoreValue = r.size;
-      let scoreLabel = r.size >= 100 ? "POPPED 💥" : `${r.size}%`;
+      let scoreLabel = r.size >= 100 ? "POPPED" : `${r.size}%`;
 
       if (is2v2) {
         const isTeam1 = r.id === ids[0] || r.id === ids[1];
         const getSize = (id: string) => results.find(res => res.id === id)?.size || 0;
         const teamScore = isTeam1 ? getSize(ids[0]) + getSize(ids[1]) : getSize(ids[2]) + getSize(ids[3]);
         scoreValue = teamScore;
-        const indLabel = r.size >= 100 ? "POPPED 💥" : `${r.size}%`;
-        scoreLabel = teamScore >= 100 ? "POPPED 💥" : `${teamScore}% Team Total (${indLabel} ind.)`;
+        const indLabel = r.size >= 100 ? "POPPED" : `${r.size}%`;
+        scoreLabel = teamScore >= 100 ? "POPPED" : `${teamScore}% Team Total (${indLabel} ind.)`;
       }
 
       return {

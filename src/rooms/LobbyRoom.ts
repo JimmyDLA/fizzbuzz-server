@@ -23,9 +23,10 @@ export class LobbyRoom extends Room {
   maxClients = 8;
   gameLoopInterval: any;
   activeGame: IMiniGame | null = null;
-  private disconnectedPlayersCache = new Map<string, { score: number, drinks: number }>();
+  private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
   private isCardLocked: boolean = false;
-  private shieldedByMap = new Map<string, string>();
+  private hasAwardedStarterCards: boolean = false;
+  private shieldChainCount: number = 0;
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -70,6 +71,27 @@ export class LobbyRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (player && player.isHost && this.state.phase === "chart") {
         this.forceWheelPhase(message.type, message.category, message.selectedPlayers);
+      }
+    });
+
+    this.onMessage("dev_award_card", (client, message) => {
+      const hostPlayer = this.state.players.get(client.sessionId);
+      if (!hostPlayer || !hostPlayer.isHost) return;
+
+      const targetPlayerId = message.targetPlayerId || client.sessionId;
+      const cardId = message.cardId;
+      const targetPlayer = this.state.players.get(targetPlayerId);
+      if (!targetPlayer || !cardId) return;
+
+      targetPlayer.cards.push(cardId);
+
+      const targetClient = this.clients.find(c => c.sessionId === targetPlayerId);
+      if (targetClient) {
+        targetClient.send("CardAwardedEvent", {
+          cardId: cardId,
+          reason: "DEV OVERRIDE",
+          message: `Dev granted you a ${cardId} card!`
+        });
       }
     });
 
@@ -189,33 +211,42 @@ export class LobbyRoom extends Room {
         if (this.state.phase === "resolution") {
           const targetPlayerId = message.targetPlayerId;
           const targetPlayer = this.state.players.get(targetPlayerId);
-          const loserIndex = this.state.lastLosers.indexOf(client.sessionId);
+          const currentDrinks = this.state.lastLosers.filter(id => id === client.sessionId).length;
 
-          // Prevent shielding self or shielding the player who shielded you (anti-loop)
-          const shieldedBy = this.shieldedByMap.get(client.sessionId);
-          if (loserIndex !== -1 && targetPlayer && targetPlayerId !== client.sessionId && targetPlayerId !== shieldedBy) {
+          // Prevent shielding self
+          if (currentDrinks > 0 && targetPlayer && targetPlayerId !== client.sessionId) {
             player.cards.splice(cardIndex, 1);
+            this.shieldChainCount += 1;
 
-            // Record shield link
-            this.shieldedByMap.set(targetPlayerId, client.sessionId);
+            // Remove all occurrences of user from lastLosers
+            while (this.state.lastLosers.indexOf(client.sessionId) !== -1) {
+              const idx = this.state.lastLosers.indexOf(client.sessionId);
+              this.state.lastLosers.splice(idx, 1);
+            }
 
-            // Negate user drink penalty
-            if (player.drinks > 0) player.drinks -= 1;
-            this.state.lastLosers.splice(loserIndex, 1);
+            // Deduct currentDrinks from player drinks counter
+            player.drinks = Math.max(0, player.drinks - currentDrinks);
 
-            // Pass drink penalty to target player
-            targetPlayer.drinks += 1;
-            if (!this.state.lastLosers.includes(targetPlayerId)) {
+            // Escalate drinks penalty: 1st shield passes currentDrinks (e.g. 1), subsequent chained shields increment by +1 (2x, 3x, 4x, 5x...)
+            const drinksToPass = this.shieldChainCount === 1 ? currentDrinks : currentDrinks + 1;
+
+            // Add escalated drinks to target player
+            targetPlayer.drinks += drinksToPass;
+
+            // Pass all escalated drinks to target player in lastLosers
+            for (let i = 0; i < drinksToPass; i++) {
               this.state.lastLosers.push(targetPlayerId);
             }
 
+            const drinkStr = drinksToPass > 1 ? `${drinksToPass} drinks` : "the drink";
             this.broadcast("CardUsedEvent", {
               userId: client.sessionId,
               playerName: player.name,
               cardId: "SHIELD",
               targetName: targetPlayer.name,
-              description: `${player.name} used SHIELD to pass the drink to ${targetPlayer.name}!`,
-              message: `${player.name} used SHIELD to pass the drink to ${targetPlayer.name}!`
+              drinkCount: drinksToPass,
+              description: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`,
+              message: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`
             });
           }
         }
@@ -226,9 +257,8 @@ export class LobbyRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
 
-      const cardIndex = message.cardIndex;
-      if (typeof cardIndex === "number" && cardIndex >= 0 && cardIndex < player.cards.length) {
-        player.cards.splice(cardIndex, 1);
+      if (typeof message.cardIndex === "number" && message.cardIndex >= 0 && message.cardIndex < player.cards.length) {
+        player.cards.splice(message.cardIndex, 1);
       } else if (message.cardId) {
         const idx = player.cards.indexOf(message.cardId);
         if (idx !== -1) {
@@ -236,6 +266,106 @@ export class LobbyRoom extends Room {
         }
       }
     });
+  }
+
+  onJoin(client: Client, options: any) {
+    console.log(client.sessionId, "joined!", options);
+
+    const player = new Player();
+    player.id = client.sessionId;
+    player.name = options.name?.trim() || `Player ${this.state.players.size + 1}`;
+    player.score = 0;
+    player.isReady = false;
+    player.isConnected = true;
+
+    const nameLower = player.name.toLowerCase();
+
+    // Check if player is reconnecting with the same name
+    let existingPlayerId: string | null = null;
+    this.state.players.forEach((p, sessionId) => {
+      if (p.name.toLowerCase() === nameLower && !p.isConnected) {
+        existingPlayerId = sessionId;
+      }
+    });
+
+    if (existingPlayerId) {
+      // Inherit state from the disconnected session
+      const oldPlayer = this.state.players.get(existingPlayerId);
+      if (oldPlayer) {
+        player.score = oldPlayer.score;
+        player.drinks = oldPlayer.drinks;
+        player.isHost = oldPlayer.isHost;
+        player.cards.push(...oldPlayer.cards);
+        player.activeEffects = oldPlayer.activeEffects;
+      }
+      // Remove the old player object
+      this.state.players.delete(existingPlayerId);
+      console.log(`[Rejoin] ${player.name} rejoined from active disconnected session.`);
+    } else if (this.disconnectedPlayersCache.has(nameLower)) {
+      // Inherit stats from cache
+      const cached = this.disconnectedPlayersCache.get(nameLower);
+      if (cached) {
+        player.score = cached.score;
+        player.drinks = cached.drinks;
+        if (cached.cards && cached.cards.length > 0) {
+          player.cards.push(...cached.cards);
+        }
+        if (cached.activeEffects) {
+          player.activeEffects = cached.activeEffects;
+        }
+      }
+      this.disconnectedPlayersCache.delete(nameLower);
+      console.log(`[Rejoin] ${player.name} rejoined from offline cache.`);
+    }
+
+    // Resolve host status: if no host exists in the lobby, make this player host
+    let hostExists = false;
+    this.state.players.forEach(p => {
+      if (p.isHost) hostExists = true;
+    });
+    if (!hostExists && this.state.players.size === 0) {
+      player.isHost = true;
+    }
+
+    this.state.players.set(client.sessionId, player);
+  }
+
+  async onLeave(client: Client, consented?: any) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const cardsArray = player.cards.toArray ? player.cards.toArray() : Array.from(player.cards);
+
+    if (consented) {
+      console.log(client.sessionId, "consented leave.");
+      // Save stats to cache
+      this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
+        score: player.score,
+        drinks: player.drinks,
+        cards: cardsArray,
+        activeEffects: player.activeEffects || "{}"
+      });
+      this.removePlayer(client.sessionId);
+    } else {
+      console.log(client.sessionId, "abnormal leave! Waiting 120s...");
+      player.isConnected = false;
+
+      try {
+        await this.allowReconnection(client, 120);
+        console.log(client.sessionId, "successfully reconnected!");
+        player.isConnected = true;
+      } catch (e) {
+        console.log(client.sessionId, "grace period expired!");
+        // Save stats to cache
+        this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
+          score: player.score,
+          drinks: player.drinks,
+          cards: cardsArray,
+          activeEffects: player.activeEffects || "{}"
+        });
+        this.removePlayer(client.sessionId);
+      }
+    }
   }
 
   awardStarterCards() {
@@ -333,92 +463,6 @@ export class LobbyRoom extends Room {
     }
   }
 
-  onJoin(client: Client, options?: any) {
-    console.log(client.sessionId, "joined!");
-    const requestedName = options?.name || `Player ${this.clients.length}`;
-    const nameLower = requestedName.toLowerCase();
-
-    // Check if there is an existing disconnected player with the SAME name in the active state
-    // (This happens if they crashed abnormally and joined with a new session instead of reconnect token)
-    let existingPlayerId: string | null = null;
-    this.state.players.forEach((p, id) => {
-      if (p.name.toLowerCase() === nameLower && !p.isConnected) {
-        existingPlayerId = id;
-      }
-    });
-
-    const player = new Player();
-    player.id = client.sessionId;
-    player.name = requestedName;
-
-    if (existingPlayerId) {
-      // Inherit stats from the active disconnected player object
-      const oldPlayer = this.state.players.get(existingPlayerId);
-      if (oldPlayer) {
-        player.score = oldPlayer.score;
-        player.drinks = oldPlayer.drinks;
-        player.isHost = oldPlayer.isHost;
-        player.cards.push(...oldPlayer.cards);
-        player.activeEffects = oldPlayer.activeEffects;
-      }
-      // Remove the old player object
-      this.state.players.delete(existingPlayerId);
-      console.log(`[Rejoin] ${player.name} rejoined from active disconnected session.`);
-    } else if (this.disconnectedPlayersCache.has(nameLower)) {
-      // Inherit stats from cache
-      const cached = this.disconnectedPlayersCache.get(nameLower);
-      if (cached) {
-        player.score = cached.score;
-        player.drinks = cached.drinks;
-      }
-      this.disconnectedPlayersCache.delete(nameLower);
-      console.log(`[Rejoin] ${player.name} rejoined from offline cache.`);
-    }
-
-    // Resolve host status: if no host exists in the lobby, make this player host
-    let hostExists = false;
-    this.state.players.forEach(p => {
-      if (p.isHost) hostExists = true;
-    });
-    if (!hostExists && this.state.players.size === 0) {
-      player.isHost = true;
-    }
-
-    this.state.players.set(client.sessionId, player);
-  }
-
-  async onLeave(client: Client, consented?: any) {
-    const player = this.state.players.get(client.sessionId);
-    if (!player) return;
-
-    if (consented) {
-      console.log(client.sessionId, "consented leave.");
-      // Save stats to cache
-      this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
-        score: player.score,
-        drinks: player.drinks
-      });
-      this.removePlayer(client.sessionId);
-    } else {
-      console.log(client.sessionId, "abnormal leave! Waiting 120s...");
-      player.isConnected = false;
-
-      try {
-        await this.allowReconnection(client, 120);
-        console.log(client.sessionId, "successfully reconnected!");
-        player.isConnected = true;
-      } catch (e) {
-        console.log(client.sessionId, "grace period expired!");
-        // Save stats to cache
-        this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
-          score: player.score,
-          drinks: player.drinks
-        });
-        this.removePlayer(client.sessionId);
-      }
-    }
-  }
-
   private removePlayer(sessionId: string) {
     const wasHost = this.state.players.get(sessionId)?.isHost;
     this.state.players.delete(sessionId);
@@ -464,8 +508,10 @@ export class LobbyRoom extends Room {
   }
 
   startWheelPhase() {
-    this.shieldedByMap.clear();
-    if (this.state.roundCount === 0) {
+    this.isCardLocked = false;
+    this.shieldChainCount = 0;
+    if (!this.hasAwardedStarterCards) {
+      this.hasAwardedStarterCards = true;
       this.awardStarterCards();
     }
     this.state.phase = "wheel";
@@ -528,7 +574,8 @@ export class LobbyRoom extends Room {
   }
 
   forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]) {
-    this.shieldedByMap.clear();
+    this.isCardLocked = false;
+    this.shieldChainCount = 0;
     this.state.phase = "wheel";
     this.state.currentGameType = type;
     this.state.currentCategory = category;
@@ -560,6 +607,7 @@ export class LobbyRoom extends Room {
   }
 
   startCountdownPhase() {
+    this.isCardLocked = false;
     this.state.phase = "countdown";
     this.state.timer = 5;
 
@@ -659,6 +707,8 @@ export class LobbyRoom extends Room {
   }
 
   startResolutionPhase() {
+    this.isCardLocked = false;
+    this.shieldChainCount = 0;
     this.state.phase = "resolution";
     this.state.roundCount += 1;
 

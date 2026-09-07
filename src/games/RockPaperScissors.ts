@@ -200,7 +200,7 @@ export class RockPaperScissors implements IMiniGame {
       const isLoser = state.lastLosers.includes(id);
       const scoreVal = this.roundScores.get(id) || 0;
       
-      let label = isWinner ? "Winner! 👑" : isLoser ? "Defeated 💀" : "Tied 🤝";
+      let label = isWinner ? "Winner!" : isLoser ? "Defeated" : "Tied";
 
       return {
         playerId: id,
