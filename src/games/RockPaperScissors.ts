@@ -22,7 +22,8 @@ export class RockPaperScissors implements IMiniGame {
       animationWord: "",
       reveal: false,
       results: {}, // hidden until reveal
-      scores: {} // round wins scores
+      scores: {}, // round wins scores
+      gameOver: false
     };
 
     state.selectedPlayers.forEach(id => {
@@ -137,6 +138,11 @@ export class RockPaperScissors implements IMiniGame {
                });
 
                setTimeout(() => {
+                 this.broadcast(state, {
+                   animationWord: "",
+                   reveal: false,
+                   gameOver: true
+                 });
                  state.timer = 0; // Trigger onEnd
                }, 2000);
              } else {

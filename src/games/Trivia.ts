@@ -79,6 +79,7 @@ export class Trivia implements IMiniGame {
     }
 
     this.currentQuestionIndex = 0;
+    this.isTransitioning = false;
     this.broadcastState(state);
   }
 
@@ -96,7 +97,8 @@ export class Trivia implements IMiniGame {
       total: this.currentBatch.length,
       answeredCorrectly: false,
       isTransitioning: false,
-      isLockedOut: false
+      isLockedOut: false,
+      gameOver: false
     };
 
     state.selectedPlayers.forEach(id => {
@@ -141,7 +143,7 @@ export class Trivia implements IMiniGame {
 
       let oldData: any = {};
       try { oldData = JSON.parse(player.gameData || "{}"); } catch (e) { }
-      if (oldData.isLockedOut) return;
+      if (oldData.isLockedOut || oldData.gameOver) return;
 
       const q = this.currentBatch[this.currentQuestionIndex];
       if (!q) return;
@@ -163,7 +165,19 @@ export class Trivia implements IMiniGame {
           this.currentQuestionIndex++;
 
           if (this.currentQuestionIndex >= this.currentBatch.length) {
-            state.timer = 0; // Force end the game loop immediately
+            state.selectedPlayers.forEach(id => {
+              const p = state.players.get(id);
+              if (p) {
+                let lp: any = {};
+                try { lp = JSON.parse(p.gameData || "{}"); } catch (e) { }
+                lp.winnerId = client.sessionId;
+                lp.gameOver = true;
+                lp.isTransitioning = false;
+                lp.index = this.currentQuestionIndex;
+                p.gameData = JSON.stringify(lp);
+              }
+            });
+            state.timer = 1;
           } else {
             this.broadcastState(state);
           }
@@ -201,7 +215,18 @@ export class Trivia implements IMiniGame {
             this.currentQuestionIndex++;
 
             if (this.currentQuestionIndex >= this.currentBatch.length) {
-              state.timer = 0; // Force end the game loop immediately
+              state.selectedPlayers.forEach(id => {
+                const p = state.players.get(id);
+                if (p) {
+                  let lp: any = {};
+                  try { lp = JSON.parse(p.gameData || "{}"); } catch (e) { }
+                  lp.gameOver = true;
+                  lp.isTransitioning = false;
+                  lp.index = this.currentQuestionIndex;
+                  p.gameData = JSON.stringify(lp);
+                }
+              });
+              state.timer = 1;
             } else {
               this.broadcastState(state);
             }
