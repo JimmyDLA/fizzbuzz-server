@@ -33,7 +33,9 @@ export class TappingRace implements IMiniGame {
 
   onEnd(state: LobbyState): void {
     let winners: string[] = [];
-    const ids = state.selectedPlayers.toArray();
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
     if (state.currentGameType === "2v2" && ids.length === 4) {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
@@ -68,7 +70,7 @@ export class TappingRace implements IMiniGame {
     });
 
     // Issue drinks penalty
-    state.selectedPlayers.forEach(id => {
+    ids.forEach(id => {
       if (!winners.includes(id)) {
         const p = state.players.get(id);
         if (p) p.drinks += 1;

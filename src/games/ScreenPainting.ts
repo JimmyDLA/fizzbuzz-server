@@ -51,16 +51,26 @@ export class ScreenPainting implements IMiniGame {
     // No tick logic needed for now
   }
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    if (this.winnerId === sessionId) {
+      this.winnerId = null;
+    }
+  }
+
   onEnd(state: LobbyState): void {
     state.lastWinners.clear();
     state.lastLosers.clear();
+
+    const connectedSelectedIds = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
     if (this.winnerId) {
       state.lastWinners.push(this.winnerId);
       const winner = state.players.get(this.winnerId);
       if (winner) winner.score += 3;
 
-      state.selectedPlayers.forEach(id => {
+      connectedSelectedIds.forEach(id => {
         if (id !== this.winnerId) {
           state.lastLosers.push(id);
           const p = state.players.get(id);
@@ -71,7 +81,7 @@ export class ScreenPainting implements IMiniGame {
       // Timeout - find player with highest coverage
       let highestCoverage = -1;
       let topPlayerId: string | null = null;
-      state.selectedPlayers.forEach(id => {
+      connectedSelectedIds.forEach(id => {
         const p = state.players.get(id);
         const score = p?.gameScore || 0;
         if (score > highestCoverage) {
@@ -86,7 +96,7 @@ export class ScreenPainting implements IMiniGame {
         const winner = state.players.get(topPlayerId);
         if (winner) winner.score += 3;
 
-        state.selectedPlayers.forEach(id => {
+        connectedSelectedIds.forEach(id => {
           if (id !== topPlayerId) {
             state.lastLosers.push(id);
             const p = state.players.get(id);
@@ -95,7 +105,7 @@ export class ScreenPainting implements IMiniGame {
         });
       } else {
         // Everyone loses
-        state.selectedPlayers.forEach(id => {
+        connectedSelectedIds.forEach(id => {
           state.lastLosers.push(id);
           const p = state.players.get(id);
           if (p) p.drinks += 1;
@@ -104,7 +114,7 @@ export class ScreenPainting implements IMiniGame {
     }
 
     // Set leaderboard data for the resolution / results screen
-    const leaderboard = state.selectedPlayers.toArray().map(id => {
+    const leaderboard = connectedSelectedIds.map(id => {
       const p = state.players.get(id);
       const isWinner = id === this.winnerId;
       const coveragePct = Math.min(100, Math.max(0, p?.gameScore || 0));

@@ -67,9 +67,17 @@ export class Perfection implements IMiniGame {
     // No tick logic needed
   }
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    if (this.winnerId === sessionId) {
+      this.winnerId = null;
+    }
+  }
+
   onEnd(state: LobbyState): void {
     let winners: string[] = [];
-    const ids = state.selectedPlayers.toArray();
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
     if (this.winnerId) {
       winners = [this.winnerId];

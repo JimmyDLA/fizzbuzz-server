@@ -49,13 +49,25 @@ export class Cyclone implements IMiniGame {
     // No specific tick logic needed
   }
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    this.stoppedPlayers.delete(sessionId);
+    this.numPlayers = state.selectedPlayers.length;
+    if (this.numPlayers > 0 && this.stoppedPlayers.size >= this.numPlayers) {
+      state.timer = 1;
+    }
+  }
+
   onEnd(state: LobbyState): void {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
+    const connectedSelectedIds = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
     const distances: { id: string, distance: number, index: number }[] = [];
 
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       if (this.stoppedPlayers.has(id)) {
         const stoppedIdx = this.stoppedPlayers.get(id)!;
         // Circular distance formula
@@ -70,8 +82,8 @@ export class Cyclone implements IMiniGame {
 
     distances.sort((a, b) => a.distance - b.distance);
 
-    const is2v2 = state.currentGameType === "2v2" && state.selectedPlayers.length === 4;
-    const ids = state.selectedPlayers.toArray();
+    const is2v2 = state.currentGameType === "2v2" && connectedSelectedIds.length === 4;
+    const ids = connectedSelectedIds;
 
     const getDist = (id: string) => distances.find(d => d.id === id)?.distance ?? 999;
     const t1Score = is2v2 ? getDist(ids[0]) + getDist(ids[1]) : 0;
@@ -123,7 +135,7 @@ export class Cyclone implements IMiniGame {
     }
 
     // Attach results locally so the UI can draw exactly who won and how close everyone was
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         let prev = {};

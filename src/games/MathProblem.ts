@@ -123,6 +123,7 @@ export class MathProblem implements IMiniGame {
         });
 
         setTimeout(() => {
+          if (state.phase !== "playing") return;
           this.isTransitioning = false;
           this.currentQuestionIndex++;
 
@@ -167,7 +168,7 @@ export class MathProblem implements IMiniGame {
         let allLockedOut = true;
         state.selectedPlayers.forEach(id => {
           const sp = state.players.get(id);
-          if (sp) {
+          if (sp && sp.isConnected) {
             let spData: any = {};
             try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
             if (!spData.isLockedOut) {
@@ -195,6 +196,7 @@ export class MathProblem implements IMiniGame {
           });
 
           setTimeout(() => {
+            if (state.phase !== "playing") return;
             this.isTransitioning = false;
             this.currentQuestionIndex++;
             
@@ -235,9 +237,78 @@ export class MathProblem implements IMiniGame {
 
   onTick(state: LobbyState): void {}
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    this.playerHistory.delete(sessionId);
+    if (this.isTransitioning || state.selectedPlayers.length === 0) return;
+
+    let allLockedOut = true;
+    state.selectedPlayers.forEach(id => {
+      const sp = state.players.get(id);
+      if (sp && sp.isConnected) {
+        let spData: any = {};
+        try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
+        if (!spData.isLockedOut) {
+          allLockedOut = false;
+        }
+      }
+    });
+
+    if (allLockedOut) {
+      this.isTransitioning = true;
+      state.selectedPlayers.forEach(id => {
+        this.playerHistory.get(id)?.push(false);
+      });
+      state.selectedPlayers.forEach(id => {
+        const sp = state.players.get(id);
+        if (sp) {
+          const lp = JSON.parse(sp.gameData || "{}");
+          lp.isTransitioning = true;
+          lp.roundWinner = "Nobody";
+          sp.gameData = JSON.stringify(lp);
+        }
+      });
+      setTimeout(() => {
+        if (state.phase !== "playing") return;
+        this.isTransitioning = false;
+        this.currentQuestionIndex++;
+        if (this.currentQuestionIndex >= this.maxQuestions) {
+          state.selectedPlayers.forEach(id => {
+             const player = state.players.get(id);
+             if (player) {
+                const lp = JSON.parse(player.gameData);
+                lp.gameOver = true;
+                lp.isTransitioning = false;
+                lp.index = this.currentQuestionIndex;
+                player.gameData = JSON.stringify(lp);
+             }
+          });
+          state.timer = 1;
+        } else {
+          const puz = generateMathProblem();
+          state.selectedPlayers.forEach(id => {
+             const player = state.players.get(id);
+             if (player) {
+                const lp = JSON.parse(player.gameData);
+                lp.question = puz.question;
+                lp.options = puz.options;
+                lp.correct = puz.correct;
+                lp.wrongAnswers = [];
+                lp.isLockedOut = false;
+                lp.isTransitioning = false;
+                lp.index = this.currentQuestionIndex;
+                player.gameData = JSON.stringify(lp);
+             }
+          });
+        }
+      }, 2500);
+    }
+  }
+
   onEnd(state: LobbyState): void {
     let winners: string[] = [];
-    const ids = state.selectedPlayers.toArray();
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
     // Apply Turbo effect (+1 extra point at the end)
     ids.forEach(id => {
@@ -278,7 +349,7 @@ export class MathProblem implements IMiniGame {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    state.selectedPlayers.forEach(id => {
+    ids.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         if (winners.includes(id)) {

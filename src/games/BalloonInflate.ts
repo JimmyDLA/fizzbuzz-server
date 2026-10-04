@@ -76,21 +76,33 @@ export class BalloonInflate implements IMiniGame {
     }
   }
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    this.balloonSizes.delete(sessionId);
+    if (this.winnerId === sessionId) {
+      this.winnerId = null;
+      this.isEnded = false;
+    }
+  }
+
   onEnd(state: LobbyState): void {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
+    const connectedSelectedIds = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
     const results: { id: string, size: number }[] = [];
 
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       const size = this.balloonSizes.get(id) || 0;
       results.push({ id, size });
     });
 
     let timeoutWinners: string[] = [];
 
-    const is2v2 = state.currentGameType === "2v2" && state.selectedPlayers.length === 4;
-    const ids = state.selectedPlayers.toArray();
+    const is2v2 = state.currentGameType === "2v2" && connectedSelectedIds.length === 4;
+    const ids = connectedSelectedIds;
 
     if (this.winnerId) {
       // Early burst win
@@ -186,7 +198,7 @@ export class BalloonInflate implements IMiniGame {
       }
     }
 
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         let prev = {};

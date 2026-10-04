@@ -169,7 +169,9 @@ export class RockPaperScissors implements IMiniGame {
   }
 
   onEnd(state: LobbyState): void {
-    const ids = state.selectedPlayers.toArray();
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
     if (ids.length < 2) return;
 
     const p1Id = ids[0];

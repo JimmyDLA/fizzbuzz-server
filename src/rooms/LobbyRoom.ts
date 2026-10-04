@@ -25,7 +25,6 @@ export class LobbyRoom extends Room {
   activeGame: IMiniGame | null = null;
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
   private isCardLocked: boolean = false;
-  private hasAwardedStarterCards: boolean = false;
   private shieldChainCount: number = 0;
 
   onAuth(client: Client, options: any, request: any) {
@@ -330,11 +329,84 @@ export class LobbyRoom extends Room {
     this.state.players.set(client.sessionId, player);
   }
 
+  private abortGameToChart(reason: string) {
+    console.log(`[AbortGame] Aborting game to chart. Reason: ${reason}`);
+    if (this.gameLoopInterval) {
+      clearInterval(this.gameLoopInterval);
+      this.gameLoopInterval = null;
+    }
+    this.activeGame = null;
+    this.isCardLocked = false;
+    this.shieldChainCount = 0;
+    this.state.phase = "chart";
+    this.state.timer = 0;
+    this.state.selectedPlayers.clear();
+    this.state.players.forEach(p => {
+      p.isReady = false;
+      p.gameData = "{}";
+      p.gameScore = 0;
+    });
+    this.state.lastWinners.clear();
+    this.state.lastLosers.clear();
+    this.state.lastGameResult = "";
+  }
+
+  private ensureConnectedHost() {
+    let hasConnectedHost = false;
+    this.state.players.forEach(p => {
+      if (p.isConnected && p.isHost) {
+        hasConnectedHost = true;
+      }
+    });
+
+    if (!hasConnectedHost) {
+      for (const [, p] of this.state.players.entries()) {
+        if (p.isConnected) {
+          p.isHost = true;
+          console.log(`[Host] Promoted ${p.name} to host.`);
+          break;
+        }
+      }
+    }
+  }
+
   async onLeave(client: Client, consented?: any) {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
     const cardsArray = player.cards.toArray ? player.cards.toArray() : Array.from(player.cards);
+    player.isConnected = false;
+
+    // Check if player was part of the current active game session
+    const isMidGame = this.state.phase === "playing" || this.state.phase === "countdown" || this.state.phase === "wheel";
+    const isInSelected = this.state.selectedPlayers.includes(client.sessionId);
+
+    if (isMidGame && isInSelected) {
+      const remainingSelected = this.state.selectedPlayers
+        .toArray()
+        .filter(id => id !== client.sessionId && this.state.players.get(id)?.isConnected);
+
+      if (this.state.currentGameType === "BR" && remainingSelected.length >= 2) {
+        console.log(`[Disconnect] ${player.name} left BR match. Continuing match with ${remainingSelected.length} players.`);
+        const idx = this.state.selectedPlayers.indexOf(client.sessionId);
+        if (idx !== -1) {
+          this.state.selectedPlayers.splice(idx, 1);
+        }
+        if (this.activeGame && this.activeGame.onPlayerDisconnect) {
+          this.activeGame.onPlayerDisconnect(client.sessionId, this.state);
+        }
+        if (this.state.phase === "wheel") {
+          this.checkAllReady();
+        }
+      } else {
+        console.log(`[Disconnect] ${player.name} left ${this.state.currentGameType} match. Aborting game to chart lobby.`);
+        this.abortGameToChart(`Player ${player.name} disconnected`);
+      }
+    } else {
+      this.checkAllReady();
+    }
+
+    this.ensureConnectedHost();
 
     if (consented) {
       console.log(client.sessionId, "consented leave.");
@@ -348,8 +420,6 @@ export class LobbyRoom extends Room {
       this.removePlayer(client.sessionId);
     } else {
       console.log(client.sessionId, "abnormal leave! Waiting 120s...");
-      player.isConnected = false;
-
       try {
         await this.allowReconnection(client, 120);
         console.log(client.sessionId, "successfully reconnected!");
@@ -366,25 +436,6 @@ export class LobbyRoom extends Room {
         this.removePlayer(client.sessionId);
       }
     }
-  }
-
-  awardStarterCards() {
-    const starterPool = ["RESPIN", "SHIELD", "TURBO", "DOUBLE POINTS"];
-    this.state.players.forEach((player, sessionId) => {
-      if (player.cards.length === 0) {
-        const card = starterPool[Math.floor(Math.random() * starterPool.length)];
-        player.cards.push(card);
-        const client = this.clients.find(c => c.sessionId === sessionId);
-        if (client) {
-          client.send("CardAwardedEvent", {
-            cardId: card,
-            reason: "starter",
-            message: "STARTER CARD — Welcome to the game!",
-          });
-        }
-        console.log(`[SpecialtyCard] Starter card ${card} awarded to ${player.name}`);
-      }
-    });
   }
 
   distributeSpecialtyCards() {
@@ -467,10 +518,13 @@ export class LobbyRoom extends Room {
     const wasHost = this.state.players.get(sessionId)?.isHost;
     this.state.players.delete(sessionId);
 
+    const idx = this.state.selectedPlayers.indexOf(sessionId);
+    if (idx !== -1) {
+      this.state.selectedPlayers.splice(idx, 1);
+    }
+
     if (wasHost && this.state.players.size > 0) {
-      const firstPlayerKey = Array.from(this.state.players.keys())[0];
-      const newHost = this.state.players.get(firstPlayerKey);
-      if (newHost) newHost.isHost = true;
+      this.ensureConnectedHost();
     }
   }
 
@@ -479,18 +533,27 @@ export class LobbyRoom extends Room {
     let allReady = true;
 
     if (this.state.phase === "wheel" || this.state.phase === "resolution") {
-      // ONLY selected players need to be ready
+      // ONLY selected connected players need to be ready
       const required = this.state.selectedPlayers.toArray();
+      let connectedSelectedCount = 0;
       required.forEach(id => {
         const p = this.state.players.get(id);
-        if (p && !p.isReady) allReady = false;
+        if (p && p.isConnected) {
+          connectedSelectedCount++;
+          if (!p.isReady) allReady = false;
+        }
       });
-      if (required.length === 0) allReady = false;
+      if (connectedSelectedCount === 0) allReady = false;
     } else {
-      // Everyone must be ready
+      // Everyone connected must be ready
+      let connectedCount = 0;
       this.state.players.forEach((player: Player) => {
-        if (!player.isReady) allReady = false;
+        if (player.isConnected) {
+          connectedCount++;
+          if (!player.isReady) allReady = false;
+        }
       });
+      if (connectedCount === 0) allReady = false;
     }
 
     if (allReady) {
@@ -510,10 +573,6 @@ export class LobbyRoom extends Room {
   startWheelPhase() {
     this.isCardLocked = false;
     this.shieldChainCount = 0;
-    if (!this.hasAwardedStarterCards) {
-      this.hasAwardedStarterCards = true;
-      this.awardStarterCards();
-    }
     this.state.phase = "wheel";
     this.state.currentGameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
     this.state.currentCategory = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
@@ -615,7 +674,9 @@ export class LobbyRoom extends Room {
       this.state.timer--;
       if (this.state.timer <= 0) {
         clearInterval(this.gameLoopInterval);
-        this.startPlayingPhase();
+        if (this.state.phase === "countdown") {
+          this.startPlayingPhase();
+        }
       }
     }, 1000);
   }
@@ -690,7 +751,7 @@ export class LobbyRoom extends Room {
         this.activeGame.onTick(this.state);
       }
 
-      if (this.state.timer <= 0) {
+      if (this.state.timer < -1) {
         clearInterval(this.gameLoopInterval);
         if (this.activeGame) {
           this.activeGame.onEnd(this.state);
@@ -699,8 +760,10 @@ export class LobbyRoom extends Room {
         // Give clients 3 seconds to view the end-state/results of the game 
         // BEFORE shifting to the resolution scoreboard phase
         setTimeout(() => {
-          this.activeGame = null;
-          this.startResolutionPhase();
+          if (this.state.phase === "playing") {
+            this.activeGame = null;
+            this.startResolutionPhase();
+          }
         }, 3000);
       }
     }, 1000);
