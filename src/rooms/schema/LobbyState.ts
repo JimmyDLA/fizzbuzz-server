@@ -10,6 +10,8 @@ export class Player extends Schema {
   @type("number") gameScore: number = 0; // Transient scoring (taps, points)
   @type("string") gameData: string = ""; // Temporary JSON schema state
   @type("boolean") isConnected: boolean = true;
+  @type(["string"]) cards = new ArraySchema<string>();
+  @type("string") activeEffects: string = ""; // JSON string e.g. {"turbo":true,"doublePoints":true}
 }
 
 export class LobbyState extends Schema {
@@ -22,4 +24,5 @@ export class LobbyState extends Schema {
   @type(["string"]) lastWinners = new ArraySchema<string>();
   @type(["string"]) lastLosers = new ArraySchema<string>();
   @type("string") lastGameResult: string = "";
+  @type("number") roundCount: number = 0;
 }

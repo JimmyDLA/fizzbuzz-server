@@ -31,7 +31,15 @@ export class BalloonInflate implements IMiniGame {
 
     if (message.action === "pump") {
       let currentSize = this.balloonSizes.get(client.sessionId) || 0;
-      currentSize += PUMP_AMOUNT;
+      let pump = PUMP_AMOUNT;
+      const p = state.players.get(client.sessionId);
+      if (p && p.activeEffects) {
+        try {
+          const fx = JSON.parse(p.activeEffects);
+          if (fx.turbo) pump = Math.round(PUMP_AMOUNT * 1.5);
+        } catch (e) {}
+      }
+      currentSize += pump;
 
       if (currentSize >= TARGET_SIZE) {
         currentSize = TARGET_SIZE;
@@ -68,21 +76,33 @@ export class BalloonInflate implements IMiniGame {
     }
   }
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    this.balloonSizes.delete(sessionId);
+    if (this.winnerId === sessionId) {
+      this.winnerId = null;
+      this.isEnded = false;
+    }
+  }
+
   onEnd(state: LobbyState): void {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
+    const connectedSelectedIds = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
     const results: { id: string, size: number }[] = [];
 
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       const size = this.balloonSizes.get(id) || 0;
       results.push({ id, size });
     });
 
     let timeoutWinners: string[] = [];
 
-    const is2v2 = state.currentGameType === "2v2" && state.selectedPlayers.length === 4;
-    const ids = state.selectedPlayers.toArray();
+    const is2v2 = state.currentGameType === "2v2" && connectedSelectedIds.length === 4;
+    const ids = connectedSelectedIds;
 
     if (this.winnerId) {
       // Early burst win
@@ -178,7 +198,7 @@ export class BalloonInflate implements IMiniGame {
       }
     }
 
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         let prev = {};
@@ -196,15 +216,15 @@ export class BalloonInflate implements IMiniGame {
       const p = state.players.get(r.id);
       const isWinner = state.lastWinners.includes(r.id);
       let scoreValue = r.size;
-      let scoreLabel = r.size >= 100 ? "POPPED 💥" : `${r.size}%`;
+      let scoreLabel = r.size >= 100 ? "POPPED" : `${r.size}%`;
 
       if (is2v2) {
         const isTeam1 = r.id === ids[0] || r.id === ids[1];
         const getSize = (id: string) => results.find(res => res.id === id)?.size || 0;
         const teamScore = isTeam1 ? getSize(ids[0]) + getSize(ids[1]) : getSize(ids[2]) + getSize(ids[3]);
         scoreValue = teamScore;
-        const indLabel = r.size >= 100 ? "POPPED 💥" : `${r.size}%`;
-        scoreLabel = teamScore >= 100 ? "POPPED 💥" : `${teamScore}% Team Total (${indLabel} ind.)`;
+        const indLabel = r.size >= 100 ? "POPPED" : `${r.size}%`;
+        scoreLabel = teamScore >= 100 ? "POPPED" : `${teamScore}% Team Total (${indLabel} ind.)`;
       }
 
       return {

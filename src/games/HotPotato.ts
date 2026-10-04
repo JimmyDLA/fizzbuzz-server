@@ -50,6 +50,24 @@ export class HotPotato implements IMiniGame {
 
   onTick(state: LobbyState): void {}
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    if (state.selectedPlayers.length === 0) return;
+    const firstPlayer = state.players.get(state.selectedPlayers[0]);
+    if (!firstPlayer) return;
+    let gameData: any = {};
+    try { gameData = JSON.parse(firstPlayer.gameData || "{}"); } catch(e) {}
+    if (gameData.potatoHolderId === sessionId) {
+      const remaining = state.selectedPlayers.toArray().filter(id => id !== sessionId && state.players.get(id)?.isConnected);
+      if (remaining.length > 0) {
+        gameData.potatoHolderId = remaining[Math.floor(Math.random() * remaining.length)];
+        state.selectedPlayers.forEach(id => {
+          const player = state.players.get(id);
+          if (player) player.gameData = JSON.stringify(gameData);
+        });
+      }
+    }
+  }
+
   onEnd(state: LobbyState): void {
     let loserId: string | null = null;
     if (state.selectedPlayers.length > 0) {
@@ -60,7 +78,7 @@ export class HotPotato implements IMiniGame {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    const selectedArray = state.selectedPlayers.toArray();
+    const selectedArray = state.selectedPlayers.toArray().filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
     selectedArray.forEach((id, index) => {
       const p = state.players.get(id);
@@ -94,7 +112,7 @@ export class HotPotato implements IMiniGame {
       return {
         playerId: id,
         playerName: p?.name || "Unknown",
-        scoreLabel: isWinner ? "Survived" : "Blew Up 💥",
+        scoreLabel: isWinner ? "Survived" : "Blew Up",
         isWinner
       };
     }).sort((a, b) => (a.isWinner === b.isWinner ? 0 : a.isWinner ? -1 : 1));

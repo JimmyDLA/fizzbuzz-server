@@ -79,6 +79,7 @@ export class Trivia implements IMiniGame {
     }
 
     this.currentQuestionIndex = 0;
+    this.isTransitioning = false;
     this.broadcastState(state);
   }
 
@@ -96,7 +97,8 @@ export class Trivia implements IMiniGame {
       total: this.currentBatch.length,
       answeredCorrectly: false,
       isTransitioning: false,
-      isLockedOut: false
+      isLockedOut: false,
+      gameOver: false
     };
 
     state.selectedPlayers.forEach(id => {
@@ -141,7 +143,7 @@ export class Trivia implements IMiniGame {
 
       let oldData: any = {};
       try { oldData = JSON.parse(player.gameData || "{}"); } catch (e) { }
-      if (oldData.isLockedOut) return;
+      if (oldData.isLockedOut || oldData.gameOver) return;
 
       const q = this.currentBatch[this.currentQuestionIndex];
       if (!q) return;
@@ -159,11 +161,24 @@ export class Trivia implements IMiniGame {
         });
 
         setTimeout(() => {
+          if (state.phase !== "playing") return;
           this.isTransitioning = false;
           this.currentQuestionIndex++;
 
           if (this.currentQuestionIndex >= this.currentBatch.length) {
-            state.timer = 0; // Force end the game loop immediately
+            state.selectedPlayers.forEach(id => {
+              const p = state.players.get(id);
+              if (p) {
+                let lp: any = {};
+                try { lp = JSON.parse(p.gameData || "{}"); } catch (e) { }
+                lp.winnerId = client.sessionId;
+                lp.gameOver = true;
+                lp.isTransitioning = false;
+                lp.index = this.currentQuestionIndex;
+                p.gameData = JSON.stringify(lp);
+              }
+            });
+            state.timer = 1;
           } else {
             this.broadcastState(state);
           }
@@ -179,7 +194,7 @@ export class Trivia implements IMiniGame {
         let allLockedOut = true;
         state.selectedPlayers.forEach(id => {
           const sp = state.players.get(id);
-          if (sp) {
+          if (sp && sp.isConnected) {
             let spData: any = {};
             try { spData = JSON.parse(sp.gameData || "{}"); } catch (e) { }
             if (!spData.isLockedOut) {
@@ -197,11 +212,23 @@ export class Trivia implements IMiniGame {
           });
           
           setTimeout(() => {
+            if (state.phase !== "playing") return;
             this.isTransitioning = false;
             this.currentQuestionIndex++;
 
             if (this.currentQuestionIndex >= this.currentBatch.length) {
-              state.timer = 0; // Force end the game loop immediately
+              state.selectedPlayers.forEach(id => {
+                const p = state.players.get(id);
+                if (p) {
+                  let lp: any = {};
+                  try { lp = JSON.parse(p.gameData || "{}"); } catch (e) { }
+                  lp.gameOver = true;
+                  lp.isTransitioning = false;
+                  lp.index = this.currentQuestionIndex;
+                  p.gameData = JSON.stringify(lp);
+                }
+              });
+              state.timer = 1;
             } else {
               this.broadcastState(state);
             }
@@ -213,9 +240,76 @@ export class Trivia implements IMiniGame {
 
   onTick(state: LobbyState): void { }
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    this.playerHistory.delete(sessionId);
+    if (this.isTransitioning || state.selectedPlayers.length === 0) return;
+
+    const q = this.currentBatch[this.currentQuestionIndex];
+    if (!q) return;
+
+    let allLockedOut = true;
+    state.selectedPlayers.forEach(id => {
+      const sp = state.players.get(id);
+      if (sp && sp.isConnected) {
+        let spData: any = {};
+        try { spData = JSON.parse(sp.gameData || "{}"); } catch (e) { }
+        if (!spData.isLockedOut) {
+          allLockedOut = false;
+        }
+      }
+    });
+
+    if (allLockedOut) {
+      this.isTransitioning = true;
+      this.broadcastTransitionState(state, "Nobody", q.correctAnswer);
+
+      state.selectedPlayers.forEach(id => {
+        this.playerHistory.get(id)?.push(false);
+      });
+      
+      setTimeout(() => {
+        if (state.phase !== "playing") return;
+        this.isTransitioning = false;
+        this.currentQuestionIndex++;
+
+        if (this.currentQuestionIndex >= this.currentBatch.length) {
+          state.selectedPlayers.forEach(id => {
+            const p = state.players.get(id);
+            if (p) {
+              let lp: any = {};
+              try { lp = JSON.parse(p.gameData || "{}"); } catch (e) { }
+              lp.gameOver = true;
+              lp.isTransitioning = false;
+              lp.index = this.currentQuestionIndex;
+              p.gameData = JSON.stringify(lp);
+            }
+          });
+          state.timer = 1;
+        } else {
+          this.broadcastState(state);
+        }
+      }, 3000);
+    }
+  }
+
   onEnd(state: LobbyState): void {
     let winners: string[] = [];
-    const ids = state.selectedPlayers.toArray();
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
+    // Apply Turbo effect (+1 extra point at the end)
+    ids.forEach(id => {
+      const p = state.players.get(id);
+      if (p && p.activeEffects) {
+        try {
+          const fx = JSON.parse(p.activeEffects);
+          if (fx.turbo) {
+            p.gameScore += 1;
+          }
+        } catch (e) {}
+      }
+    });
 
     if (state.currentGameType === "2v2" && ids.length === 4) {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
@@ -243,7 +337,7 @@ export class Trivia implements IMiniGame {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    state.selectedPlayers.forEach(id => {
+    ids.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         if (winners.length > 0 && winners.includes(id)) {

@@ -6,4 +6,5 @@ export interface IMiniGame {
   onMessage(client: Client, message: any, state: LobbyState): void;
   onTick(state: LobbyState): void;
   onEnd(state: LobbyState): void;
+  onPlayerDisconnect?(sessionId: string, state: LobbyState): void;
 }

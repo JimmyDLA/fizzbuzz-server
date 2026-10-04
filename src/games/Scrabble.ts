@@ -70,7 +70,16 @@ export class Scrabble implements IMiniGame {
 
         // Add points based on length
         const p = state.players.get(id);
-        if (p) p.gameScore += word.length;
+        if (p) {
+          let pts = word.length;
+          if (p.activeEffects) {
+            try {
+              const fx = JSON.parse(p.activeEffects);
+              if (fx.turbo) pts = Math.round(pts * 1.5);
+            } catch (e) {}
+          }
+          p.gameScore += pts;
+        }
 
         this.syncGameData(state, gameData);
       }
@@ -85,7 +94,9 @@ export class Scrabble implements IMiniGame {
   }
 
   onEnd(state: LobbyState): void {
-    const ids = state.selectedPlayers.toArray();
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
     const is2v2 = state.currentGameType === "2v2" && ids.length === 4;
 
     const getScore = (id: string) => state.players.get(id)?.gameScore || 0;
@@ -124,7 +135,7 @@ export class Scrabble implements IMiniGame {
       state.lastWinners.push(id);
     });
 
-    state.selectedPlayers.forEach(id => {
+    ids.forEach(id => {
       if (!winners.includes(id)) {
         const p = state.players.get(id);
         if (p) p.drinks += 1;

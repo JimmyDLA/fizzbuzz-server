@@ -169,6 +169,29 @@ export class SimonSays implements IMiniGame {
     this.syncGameData(state, gameData);
   }
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    if (state.selectedPlayers.length === 0) return;
+    const firstPlayer = state.players.get(state.selectedPlayers[0]);
+    if (!firstPlayer) return;
+    let gameData: any;
+    try {
+      gameData = JSON.parse(firstPlayer.gameData);
+    } catch (e) {
+      return;
+    }
+    gameData.activePlayers = (gameData.activePlayers || []).filter((pId: string) => pId !== sessionId);
+    gameData.failedPlayers = (gameData.failedPlayers || []).filter((pId: string) => pId !== sessionId);
+    if (gameData.progress) delete gameData.progress[sessionId];
+    if (gameData.activePlayers.length <= 1 && !gameData.isGameOver) {
+      if (gameData.activePlayers.length === 1) {
+        gameData.isGameOver = true;
+        gameData.winners = [gameData.activePlayers[0]];
+        state.timer = 0;
+      }
+    }
+    this.syncGameData(state, gameData);
+  }
+
   onEnd(state: LobbyState): void {
     const firstPlayerId = state.selectedPlayers[0];
     const firstPlayer = state.players.get(firstPlayerId);
@@ -177,7 +200,9 @@ export class SimonSays implements IMiniGame {
       try { gameData = JSON.parse(firstPlayer.gameData); } catch (e) {}
     }
 
-    const ids = state.selectedPlayers.toArray();
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
     let winners: string[] = gameData.winners || [];
 
     // Fallback: if game ended without winners being set (e.g. maximum room timer expired),
@@ -196,7 +221,7 @@ export class SimonSays implements IMiniGame {
       state.lastWinners.push(id);
     });
 
-    state.selectedPlayers.forEach(id => {
+    ids.forEach(id => {
       if (!winners.includes(id)) {
         const p = state.players.get(id);
         if (p) p.drinks += 1;

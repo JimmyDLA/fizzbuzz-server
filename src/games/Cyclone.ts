@@ -49,13 +49,25 @@ export class Cyclone implements IMiniGame {
     // No specific tick logic needed
   }
 
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    this.stoppedPlayers.delete(sessionId);
+    this.numPlayers = state.selectedPlayers.length;
+    if (this.numPlayers > 0 && this.stoppedPlayers.size >= this.numPlayers) {
+      state.timer = 1;
+    }
+  }
+
   onEnd(state: LobbyState): void {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
+    const connectedSelectedIds = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
     const distances: { id: string, distance: number, index: number }[] = [];
 
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       if (this.stoppedPlayers.has(id)) {
         const stoppedIdx = this.stoppedPlayers.get(id)!;
         // Circular distance formula
@@ -70,8 +82,8 @@ export class Cyclone implements IMiniGame {
 
     distances.sort((a, b) => a.distance - b.distance);
 
-    const is2v2 = state.currentGameType === "2v2" && state.selectedPlayers.length === 4;
-    const ids = state.selectedPlayers.toArray();
+    const is2v2 = state.currentGameType === "2v2" && connectedSelectedIds.length === 4;
+    const ids = connectedSelectedIds;
 
     const getDist = (id: string) => distances.find(d => d.id === id)?.distance ?? 999;
     const t1Score = is2v2 ? getDist(ids[0]) + getDist(ids[1]) : 0;
@@ -123,7 +135,7 @@ export class Cyclone implements IMiniGame {
     }
 
     // Attach results locally so the UI can draw exactly who won and how close everyone was
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         let prev = {};
@@ -138,19 +150,19 @@ export class Cyclone implements IMiniGame {
 
     const leaderboard = distances.map(d => {
       const p = state.players.get(d.id);
-      let scoreLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE! 🎯" : `Missed by ${d.distance}`;
+      let scoreLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE!" : `Missed by ${d.distance}`;
       let scoreValue = d.distance;
 
       if (is2v2) {
         const isTeam1 = d.id === ids[0] || d.id === ids[1];
         const teamScore = isTeam1 ? t1Score : t2Score;
         scoreValue = teamScore;
-        const indLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE! 🎯" : `Missed by ${d.distance}`;
+        const indLabel = d.distance === 999 ? "Timeout" : d.distance === 0 ? "BULLSEYE!" : `Missed by ${d.distance}`;
         
         if (teamScore >= 1998) {
           scoreLabel = `Team Timeout (${indLabel} ind.)`;
         } else if (teamScore === 0) {
-          scoreLabel = `TEAM BULLSEYE! 🎯 (${indLabel} ind.)`;
+          scoreLabel = `TEAM BULLSEYE! (${indLabel} ind.)`;
         } else {
           scoreLabel = `Missed by ${teamScore} total (${indLabel} ind.)`;
         }

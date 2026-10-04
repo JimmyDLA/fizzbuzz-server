@@ -22,7 +22,8 @@ export class RockPaperScissors implements IMiniGame {
       animationWord: "",
       reveal: false,
       results: {}, // hidden until reveal
-      scores: {} // round wins scores
+      scores: {}, // round wins scores
+      gameOver: false
     };
 
     state.selectedPlayers.forEach(id => {
@@ -137,6 +138,11 @@ export class RockPaperScissors implements IMiniGame {
                });
 
                setTimeout(() => {
+                 this.broadcast(state, {
+                   animationWord: "",
+                   reveal: false,
+                   gameOver: true
+                 });
                  state.timer = 0; // Trigger onEnd
                }, 2000);
              } else {
@@ -163,7 +169,9 @@ export class RockPaperScissors implements IMiniGame {
   }
 
   onEnd(state: LobbyState): void {
-    const ids = state.selectedPlayers.toArray();
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
     if (ids.length < 2) return;
 
     const p1Id = ids[0];
@@ -200,7 +208,7 @@ export class RockPaperScissors implements IMiniGame {
       const isLoser = state.lastLosers.includes(id);
       const scoreVal = this.roundScores.get(id) || 0;
       
-      let label = isWinner ? "Winner! 👑" : isLoser ? "Defeated 💀" : "Tied 🤝";
+      let label = isWinner ? "Winner!" : isLoser ? "Defeated" : "Tied";
 
       return {
         playerId: id,
