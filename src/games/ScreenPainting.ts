@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class ScreenPainting implements IMiniGame {
@@ -57,7 +57,7 @@ export class ScreenPainting implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
@@ -65,20 +65,19 @@ export class ScreenPainting implements IMiniGame {
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
+    let tiedIds: string[] = [];
+
     if (this.winnerId) {
       state.lastWinners.push(this.winnerId);
-      const winner = state.players.get(this.winnerId);
-      if (winner) winner.score += 3;
 
       connectedSelectedIds.forEach(id => {
         if (id !== this.winnerId) {
           state.lastLosers.push(id);
-          const p = state.players.get(id);
-          if (p) p.drinks += 1;
         }
       });
     } else {
-      // Timeout - find player with highest coverage
+      // Timeout - find player with highest coverage.
+      // A tie keeps the first id in selectedPlayers (strict >), not every tied player.
       let highestCoverage = -1;
       let topPlayerId: string | null = null;
       connectedSelectedIds.forEach(id => {
@@ -90,25 +89,24 @@ export class ScreenPainting implements IMiniGame {
         }
       });
 
+      if (highestCoverage > 0) {
+        const tied = connectedSelectedIds.filter(id => (state.players.get(id)?.gameScore || 0) === highestCoverage);
+        if (tied.length > 1) tiedIds = tied;
+      }
+
       if (topPlayerId && highestCoverage > 0) {
         this.winnerId = topPlayerId;
         state.lastWinners.push(topPlayerId);
-        const winner = state.players.get(topPlayerId);
-        if (winner) winner.score += 3;
 
         connectedSelectedIds.forEach(id => {
           if (id !== topPlayerId) {
             state.lastLosers.push(id);
-            const p = state.players.get(id);
-            if (p) p.drinks += 1;
           }
         });
       } else {
         // Everyone loses
         connectedSelectedIds.forEach(id => {
           state.lastLosers.push(id);
-          const p = state.players.get(id);
-          if (p) p.drinks += 1;
         });
       }
     }
@@ -132,5 +130,11 @@ export class ScreenPainting implements IMiniGame {
       title: "Painting Race Results",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }

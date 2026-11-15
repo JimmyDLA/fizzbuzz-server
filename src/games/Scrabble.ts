@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 import englishWords from 'an-array-of-english-words';
 
@@ -93,7 +93,7 @@ export class Scrabble implements IMiniGame {
     // Standard 30 second timer handled by the room. No custom ticking needed.
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     const ids = state.selectedPlayers
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
@@ -102,6 +102,7 @@ export class Scrabble implements IMiniGame {
     const getScore = (id: string) => state.players.get(id)?.gameScore || 0;
     
     let winners: string[] = [];
+    let tiedIds: string[] = [];
     
     if (is2v2) {
       const t1Score = getScore(ids[0]) + getScore(ids[1]);
@@ -110,6 +111,7 @@ export class Scrabble implements IMiniGame {
       else if (t2Score > t1Score && t2Score > 0) winners = [ids[2], ids[3]];
       else if (t1Score === t2Score && t1Score > 0) winners = [...ids]; // Tie with points
       else winners = []; // Nobody found words -> everyone loses!
+      if (t1Score === t2Score && t1Score > 0) tiedIds = [...winners];
     } else {
       let maxScore = -1;
       ids.forEach(id => {
@@ -123,22 +125,18 @@ export class Scrabble implements IMiniGame {
           winners.push(id);
         }
       });
+      if (winners.length > 1) tiedIds = [...winners];
     }
 
-    // Award standard points
     state.lastWinners.clear();
     state.lastLosers.clear();
 
     winners.forEach(id => {
-      const p = state.players.get(id);
-      if (p) p.score += 3;
       state.lastWinners.push(id);
     });
 
     ids.forEach(id => {
       if (!winners.includes(id)) {
-        const p = state.players.get(id);
-        if (p) p.drinks += 1;
         state.lastLosers.push(id);
       }
     });
@@ -168,6 +166,12 @@ export class Scrabble implements IMiniGame {
       title: "Scrabble Results",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 
   private canFormWord(word: string, availableLetters: string[]): boolean {

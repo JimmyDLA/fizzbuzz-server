@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class HotPotato implements IMiniGame {
@@ -68,7 +68,7 @@ export class HotPotato implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     let loserId: string | null = null;
     if (state.selectedPlayers.length > 0) {
        const gameData = JSON.parse(state.players.get(state.selectedPlayers[0])?.gameData || "{}");
@@ -97,10 +97,8 @@ export class HotPotato implements IMiniGame {
         }
 
         if (isLoser) {
-          p.drinks += 1;
           state.lastLosers.push(id);
         } else {
-          p.score += 3;
           state.lastWinners.push(id);
         }
       }
@@ -122,5 +120,11 @@ export class HotPotato implements IMiniGame {
       title: "Potato Explosion",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds: [],
+    };
   }
 }

@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class TappingRace implements IMiniGame {
@@ -31,11 +31,13 @@ export class TappingRace implements IMiniGame {
     // No time-specific logic needed per tick for Tapping Race
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     let winners: string[] = [];
     const ids = state.selectedPlayers
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
+    let tiedIds: string[] = [];
 
     if (state.currentGameType === "2v2" && ids.length === 4) {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
@@ -43,6 +45,7 @@ export class TappingRace implements IMiniGame {
 
       if (t1Score >= t2Score && t1Score > 0) winners.push(ids[0], ids[1]);
       if (t2Score >= t1Score && t2Score > 0) winners.push(ids[2], ids[3]);
+      if (t1Score === t2Score && t1Score > 0) tiedIds = [...winners];
     } else {
       let maxScore = 0;
       ids.forEach(id => {
@@ -56,24 +59,19 @@ export class TappingRace implements IMiniGame {
           }
         }
       });
+      if (winners.length > 1) tiedIds = [...winners];
     }
 
     // Resolve universal variables
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    // Award standard points
     winners.forEach(id => {
-      const p = state.players.get(id);
-      if (p) p.score += 3;
       state.lastWinners.push(id);
     });
 
-    // Issue drinks penalty
     ids.forEach(id => {
       if (!winners.includes(id)) {
-        const p = state.players.get(id);
-        if (p) p.drinks += 1;
         state.lastLosers.push(id);
       }
     });
@@ -108,5 +106,11 @@ export class TappingRace implements IMiniGame {
       title: "Final Tap Counts",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }

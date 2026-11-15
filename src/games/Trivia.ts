@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class Trivia implements IMiniGame {
@@ -292,8 +292,9 @@ export class Trivia implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     let winners: string[] = [];
+    let tiedIds: string[] = [];
     const ids = state.selectedPlayers
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
@@ -317,6 +318,7 @@ export class Trivia implements IMiniGame {
 
       if (t1Score >= t2Score && t1Score > 0) winners.push(ids[0], ids[1]);
       if (t2Score >= t1Score && t2Score > 0) winners.push(ids[2], ids[3]);
+      if (t1Score === t2Score && t1Score > 0) tiedIds = [...winners];
     } else {
       let maxScore = -1;
       ids.forEach(id => {
@@ -332,6 +334,7 @@ export class Trivia implements IMiniGame {
       });
       // Winners only count if score > 0
       if (maxScore <= 0) winners = [];
+      if (winners.length > 1) tiedIds = [...winners];
     }
 
     state.lastWinners.clear();
@@ -341,10 +344,8 @@ export class Trivia implements IMiniGame {
       const p = state.players.get(id);
       if (p) {
         if (winners.length > 0 && winners.includes(id)) {
-          p.score += 3;
           state.lastWinners.push(id);
         } else {
-          p.drinks += 1;
           state.lastLosers.push(id);
         }
       }
@@ -386,5 +387,11 @@ export class Trivia implements IMiniGame {
       title: "Trivia Breakdown",
       timeline
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }

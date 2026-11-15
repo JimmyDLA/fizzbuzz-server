@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { emptyGameResult, GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class RockPaperScissors implements IMiniGame {
@@ -168,11 +168,11 @@ export class RockPaperScissors implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     const ids = state.selectedPlayers
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
-    if (ids.length < 2) return;
+    if (ids.length < 2) return emptyGameResult();
 
     const p1Id = ids[0];
     const p2Id = ids[1];
@@ -182,6 +182,7 @@ export class RockPaperScissors implements IMiniGame {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
+    let tiedIds: string[] = [];
     if (score1 > score2 && score1 > 0) {
       state.lastWinners.push(p1Id);
       state.lastLosers.push(p2Id);
@@ -191,16 +192,8 @@ export class RockPaperScissors implements IMiniGame {
     } else {
       // Tied or nobody scored (both score 0) -> Both are losers!
       state.lastLosers.push(p1Id, p2Id);
+      tiedIds = [p1Id, p2Id];
     }
-
-    state.lastWinners.forEach(id => {
-      const p = state.players.get(id);
-      if (p) p.score += 3;
-    });
-    state.lastLosers.forEach(id => {
-      const p = state.players.get(id);
-      if (p) p.drinks += 1;
-    });
 
     const leaderboard = ids.map(id => {
       const p = state.players.get(id);
@@ -223,5 +216,11 @@ export class RockPaperScissors implements IMiniGame {
       title: "RPS Results",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }

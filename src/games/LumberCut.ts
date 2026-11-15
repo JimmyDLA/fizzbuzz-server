@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { emptyGameResult, GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class LumberCut implements IMiniGame {
@@ -100,18 +100,19 @@ export class LumberCut implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     const connectedSelectedIds = state.selectedPlayers
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
-    if (connectedSelectedIds.length === 0) return;
+    if (connectedSelectedIds.length === 0) return emptyGameResult();
 
     let gameData: any = {};
     try {
       gameData = JSON.parse(state.players.get(connectedSelectedIds[0])?.gameData || "{}");
     } catch(e) {}
     let winners: string[] = gameData.winners || [];
+    let tiedIds: string[] = [];
 
     // Fallback: If timer expires without a full log severance, calculate the furthest pairing natively
     if (!gameData.gameOver || winners.length === 0) {
@@ -128,6 +129,8 @@ export class LumberCut implements IMiniGame {
       
       winners = [];
       winningTeams.forEach(t => winners.push(...t.members));
+      // Equal progress, including nobody cutting (every team at 0), is a shared win.
+      if (winningTeams.length > 1) tiedIds = [...winners];
     }
 
     state.lastWinners.clear();
@@ -137,10 +140,8 @@ export class LumberCut implements IMiniGame {
       const p = state.players.get(id);
       if (p) {
         if (winners.includes(id)) {
-          p.score += 3;
           state.lastWinners.push(id);
         } else {
-          p.drinks += 1;
           state.lastLosers.push(id);
         }
       }
@@ -169,5 +170,11 @@ export class LumberCut implements IMiniGame {
       title: "Lumber Cut Results",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }
