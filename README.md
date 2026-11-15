@@ -9,15 +9,19 @@ FizzBuzz is an interactive multiplayer party game where players connect to a sha
 - **Real-time State Synchronization:** Powered by Colyseus for ultra-low latency multiplayer game loops.
 - **Dynamic Game Modes:** Supports 1v1, 2v2 Team Battles, and Free-for-all Battle Royale (BR).
 - **Practice Mode:** A dedicated, consequence-free practice state that allows players to try out games together before putting drinks on the line.
-- **8 Interactive Mini-Games:**
+- **12 Interactive Mini-Games:**
   - 🏎️ **Tapping Race**: Mash the button as fast as possible.
   - 🧠 **Trivia**: Answer general knowledge questions correctly.
   - ➕ **Math Problem**: Solve rapid-fire math equations.
   - 🌪️ **Cyclone**: Stop the light exactly on the bullseye.
-  - 🎈 **Balloon Inflate**: Pump the balloon until it pops—but don't wait too long!
+  - 🎈 **Balloon Inflate**: Pump the balloon to 100% to win—but don't wait too long!
   - 🪓 **Lumber Cut**: Coordinate with a partner to saw logs (2v2 focus).
   - 🥔 **Hot Potato**: Pass the bomb before it explodes (1v1 focus).
   - ✂️ **Rock Paper Scissors**: A classic showdown (1v1 focus).
+  - 🔴 **Simon Says**: Repeat a growing sequence of lights and sounds.
+  - 🔤 **Scrabble (Anagram Sprint)**: Unscramble letter tiles into valid words.
+  - 🎨 **Screen Painting**: Swipe to cover the screen in paint before anyone else.
+  - 🧩 **Perfection**: Drag shapes into their cutouts before the pop timer springs.
 - **Automated Leaderboards:** Computes individual and team tallies instantly at the end of each round.
 
 ## Tech Stack
@@ -31,7 +35,7 @@ FizzBuzz is an interactive multiplayer party game where players connect to a sha
 
 ### Prerequisites
 
-- Node.js (v16 or higher recommended)
+- Node.js (v20 or higher recommended)
 - npm or yarn
 
 ### Installation
@@ -59,7 +63,7 @@ FizzBuzz is an interactive multiplayer party game where players connect to a sha
 
 - **`src/rooms/LobbyRoom.ts`**: The core room where all players connect. Handles the wheel spinning, player readiness, mode selections, and phase transitions (chart -> wheel -> ready -> playing -> resolution).
 - **`src/rooms/schema/LobbyState.ts`**: The synchronized schema that tracks the players, scores, active game phase, and practice states.
-- **`src/games/`**: Contains the isolated logic for each of the 8 mini-games, implementing the `IMiniGame` interface for consistent `onInit`, `onMessage`, `onTick`, and `onEnd` lifecycle hooks.
+- **`src/games/`**: Contains the isolated logic for each of the 12 mini-games, implementing the `IMiniGame` interface for consistent `onInit`, `onMessage`, `onTick`, and `onEnd` lifecycle hooks.
 
 ## License
 
