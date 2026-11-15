@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class Perfection implements IMiniGame {
@@ -73,8 +73,9 @@ export class Perfection implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     let winners: string[] = [];
+    let tiedIds: string[] = [];
     const ids = state.selectedPlayers
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
@@ -98,6 +99,7 @@ export class Perfection implements IMiniGame {
             winners.push(id);
           }
         });
+        if (winners.length > 1) tiedIds = [...winners];
       }
     }
 
@@ -108,10 +110,8 @@ export class Perfection implements IMiniGame {
       const p = state.players.get(id);
       if (p) {
         if (winners.includes(id)) {
-          p.score += 3;
           state.lastWinners.push(id);
         } else {
-          p.drinks += 1;
           state.lastLosers.push(id);
         }
       }
@@ -134,5 +134,11 @@ export class Perfection implements IMiniGame {
       title: "Perfection Placement Results",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }

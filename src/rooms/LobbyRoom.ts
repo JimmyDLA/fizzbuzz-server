@@ -13,6 +13,7 @@ import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
+import { applyDoublePoints, applyStandardScoring } from "./scoring";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
@@ -753,9 +754,7 @@ export class LobbyRoom extends Room {
 
       if (this.state.timer < -1) {
         clearInterval(this.gameLoopInterval);
-        if (this.activeGame) {
-          this.activeGame.onEnd(this.state);
-        }
+        this.applyActiveGameResult();
 
         // Give clients 3 seconds to view the end-state/results of the game 
         // BEFORE shifting to the resolution scoreboard phase
@@ -769,6 +768,16 @@ export class LobbyRoom extends Room {
     }, 1000);
   }
 
+  /**
+   * Games only report who won, who drinks, and who tied.
+   * Standard +3 / +1 drink is applied here, once, before resolution.
+   */
+  applyActiveGameResult() {
+    if (!this.activeGame) return;
+    const result = this.activeGame.onEnd(this.state);
+    applyStandardScoring(this.state, result);
+  }
+
   startResolutionPhase() {
     this.isCardLocked = false;
     this.shieldChainCount = 0;
@@ -776,18 +785,7 @@ export class LobbyRoom extends Room {
     this.state.roundCount += 1;
 
     // Process DOUBLE POINTS effect for winners
-    this.state.lastWinners.forEach(winnerId => {
-      const p = this.state.players.get(winnerId);
-      if (p && p.activeEffects) {
-        try {
-          const fx = JSON.parse(p.activeEffects);
-          if (fx.doublePoints) {
-            p.score += 3; // Extra +3 score to double standard +3 win points to +6
-            console.log(`[SpecialtyCard] ${p.name} earned DOUBLE POINTS (+6 total)!`);
-          }
-        } catch(e) {}
-      }
-    });
+    applyDoublePoints(this.state);
 
     // Check if roundCount is a multiple of 3 to distribute cards
     if (this.state.roundCount > 0 && this.state.roundCount % 3 === 0) {

@@ -1,8 +1,9 @@
 import type { Client } from "@colyseus/core";
 import assert from "node:assert/strict";
-import { IMiniGame } from "../src/games/IMiniGame";
+import { GameResult, IMiniGame } from "../src/games/IMiniGame";
 import { LobbyState, Player } from "../src/rooms/schema/LobbyState";
 import { LobbyRoom } from "../src/rooms/LobbyRoom";
+import { applyStandardScoring } from "../src/rooms/scoring";
 
 export interface TestPlayer {
   id: string;
@@ -18,8 +19,11 @@ export interface ExpectedOutcome {
   scores: Record<string, { score: number; drinks: number }>;
   winners: string[];
   losers: string[];
+  tiedIds: string[];
   result?: unknown;
   gameScores?: Record<string, number>;
+  /** onEnd left a previous resolution in place and reported an empty result. */
+  preservesPriorResolution?: boolean;
 }
 
 export function client(id: string): Client {
@@ -57,13 +61,24 @@ export function player(state: LobbyState, id: string): Player {
   return found;
 }
 
+function snapshotScores(state: LobbyState): Record<string, { score: number; drinks: number }> {
+  const actual: Record<string, { score: number; drinks: number }> = {};
+  state.players.forEach((entry, id) => {
+    actual[id] = { score: entry.score, drinks: entry.drinks };
+  });
+  return actual;
+}
+
 /**
- * Run a mini-game's ending. Today onEnd itself applies +3 / drinks.
- * The scoring refactor keeps these assertions and moves the payout
- * into LobbyRoom behind this helper.
+ * End a mini-game the way LobbyRoom does: the game reports a result and does
+ * not touch score or drinks, then the shared payout applies +3 and +1 drink.
  */
-export function settle(game: IMiniGame, state: LobbyState): void {
-  game.onEnd(state);
+export function settle(game: IMiniGame, state: LobbyState): GameResult {
+  const before = snapshotScores(state);
+  const result = game.onEnd(state);
+  assert.deepEqual(snapshotScores(state), before, "onEnd must not change score or drinks");
+  applyStandardScoring(state, result);
+  return result;
 }
 
 export function assertOutcome(state: LobbyState, expected: ExpectedOutcome): void {
@@ -87,8 +102,15 @@ export function assertOutcome(state: LobbyState, expected: ExpectedOutcome): voi
 }
 
 export function finish(game: IMiniGame, state: LobbyState, expected: ExpectedOutcome): void {
-  settle(game, state);
+  const result = settle(game, state);
   assertOutcome(state, expected);
+  assert.deepEqual(result.tiedIds, expected.tiedIds, "tiedIds");
+  if (expected.preservesPriorResolution) {
+    assert.deepEqual(result, { winners: [], losers: [], tiedIds: [] });
+  } else {
+    assert.deepEqual(result.winners, state.lastWinners.toArray(), "result.winners");
+    assert.deepEqual(result.losers, state.lastLosers.toArray(), "result.losers");
+  }
 }
 
 /** Resolution phase: Double Points extra +3, then effects are cleared. */

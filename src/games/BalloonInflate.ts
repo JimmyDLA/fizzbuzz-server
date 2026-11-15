@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 const TARGET_SIZE = 100;
@@ -84,9 +84,10 @@ export class BalloonInflate implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     state.lastWinners.clear();
     state.lastLosers.clear();
+    let tiedIds: string[] = [];
 
     const connectedSelectedIds = state.selectedPlayers
       .toArray()
@@ -114,25 +115,17 @@ export class BalloonInflate implements IMiniGame {
         winners.forEach(w => {
           state.lastWinners.push(w);
           timeoutWinners.push(w);
-          const p = state.players.get(w);
-          if (p) p.score += 3;
         });
 
         losers.forEach(l => {
           state.lastLosers.push(l);
-          const p = state.players.get(l);
-          if (p) p.drinks += 1;
         });
       } else {
         state.lastWinners.push(this.winnerId);
-        const p = state.players.get(this.winnerId);
-        if (p) p.score += 3;
 
         results.forEach(l => {
           if (l.id !== this.winnerId) {
             state.lastLosers.push(l.id);
-            const loserP = state.players.get(l.id);
-            if (loserP) loserP.drinks += 1;
           }
         });
       }
@@ -146,25 +139,20 @@ export class BalloonInflate implements IMiniGame {
         if (t1Score > 0 || t2Score > 0) {
           const winners = t1Score > t2Score ? [ids[0], ids[1]] : t2Score > t1Score ? [ids[2], ids[3]] : [...ids];
           const losers = t1Score > t2Score ? [ids[2], ids[3]] : t2Score > t1Score ? [ids[0], ids[1]] : [];
+          if (t1Score === t2Score && t1Score > 0) tiedIds = [...winners];
 
           winners.forEach(w => {
             state.lastWinners.push(w);
             timeoutWinners.push(w);
-            const p = state.players.get(w);
-            if (p) p.score += 3;
           });
 
           losers.forEach(l => {
             state.lastLosers.push(l);
-            const p = state.players.get(l);
-            if (p) p.drinks += 1;
           });
         } else {
           // Nobody pumped
           ids.forEach(l => {
             state.lastLosers.push(l);
-            const p = state.players.get(l);
-            if (p) p.drinks += 1;
           });
         }
       } else {
@@ -174,25 +162,20 @@ export class BalloonInflate implements IMiniGame {
         if (max > 0) {
           const winners = results.filter(r => r.size === max);
           const losers = results.filter(r => r.size !== max);
+          if (winners.length > 1) tiedIds = winners.map(w => w.id);
 
           winners.forEach(w => {
             state.lastWinners.push(w.id);
             timeoutWinners.push(w.id);
-            const p = state.players.get(w.id);
-            if (p) p.score += 3;
           });
 
           losers.forEach(l => {
             state.lastLosers.push(l.id);
-            const p = state.players.get(l.id);
-            if (p) p.drinks += 1;
           });
         } else {
           // Nobody pumped
           results.forEach(l => {
             state.lastLosers.push(l.id);
-            const p = state.players.get(l.id);
-            if (p) p.drinks += 1;
           });
         }
       }
@@ -241,5 +224,11 @@ export class BalloonInflate implements IMiniGame {
       title: "Balloon Sizes",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }

@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 const NUM_LIGHTS = 50;
@@ -57,9 +57,10 @@ export class Cyclone implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
+  onEnd(state: LobbyState): GameResult {
     state.lastWinners.clear();
     state.lastLosers.clear();
+    let tiedIds: string[] = [];
 
     const connectedSelectedIds = state.selectedPlayers
       .toArray()
@@ -100,36 +101,30 @@ export class Cyclone implements IMiniGame {
           
           if (t2Score <= t1Score) winners.push(ids[2], ids[3]);
           else losers.push(ids[2], ids[3]);
+          if (t1Score === t2Score) tiedIds = [...winners];
         } else {
           losers.push(...ids);
         }
 
         winners.forEach(id => {
           state.lastWinners.push(id);
-          const p = state.players.get(id);
-          if (p) p.score += 3;
         });
 
         losers.forEach(id => {
           state.lastLosers.push(id);
-          const p = state.players.get(id);
-          if (p) p.drinks += 1;
         });
       } else {
         const bestDist = distances[0].distance;
         const winners = bestDist === 999 ? [] : distances.filter(d => d.distance === bestDist);
         const losers = bestDist === 999 ? distances : distances.filter(d => d.distance !== bestDist);
+        if (winners.length > 1) tiedIds = winners.map(w => w.id);
 
         winners.forEach(w => {
           state.lastWinners.push(w.id);
-          const p = state.players.get(w.id);
-          if (p) p.score += 3;
         });
 
         losers.forEach(l => {
           state.lastLosers.push(l.id);
-          const p = state.players.get(l.id);
-          if (p) p.drinks += 1;
         });
       }
     }
@@ -182,5 +177,11 @@ export class Cyclone implements IMiniGame {
       title: "Cyclone Precision",
       leaderboard
     });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }

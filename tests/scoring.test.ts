@@ -12,9 +12,9 @@ import { ScreenPainting } from "../src/games/ScreenPainting";
 import { SimonSays } from "../src/games/SimonSays";
 import { TappingRace } from "../src/games/TappingRace";
 import { Trivia } from "../src/games/Trivia";
+import { LobbyRoom } from "../src/rooms/LobbyRoom";
 import { LobbyState } from "../src/rooms/schema/LobbyState";
 import {
-  assertOutcome,
   client,
   finish,
   makeState,
@@ -26,8 +26,8 @@ import {
 } from "./helpers";
 
 /**
- * Characterization of who wins, who drinks, and the resolution payloads.
- * These quirks are intentional: do not "fix" them.
+ * Scoring outcomes for every mini-game. Each game reports winners, losers, and
+ * who tied; LobbyRoom applies +3 and one drink. These quirks are intentional.
  * - Non-RPS ties: every tied player wins, and a 2v2 tie is both teams win.
  * - A score of 0 is not a win (except Lumber Cut, where cutting nothing ties and everyone wins).
  * - RPS final tie or 0-0: both players lose. Battle Royale still scores only the first two ids.
@@ -78,6 +78,7 @@ describe("Tapping Race", () => {
       scores: { a: score(3), b: score(0, 1), c: score(0, 1) },
       winners: ["a"],
       losers: ["b", "c"],
+      tiedIds: [],
       result: board("Final Tap Counts", [
         { playerId: "a", playerName: "Ada", scoreValue: 9, scoreLabel: "9 Taps", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 4, scoreLabel: "4 Taps", isWinner: false },
@@ -98,6 +99,7 @@ describe("Tapping Race", () => {
       scores: { a: score(3), b: score(3) },
       winners: ["a", "b"],
       losers: [],
+      tiedIds: ["a", "b"],
       result: board("Final Tap Counts", [
         { playerId: "a", playerName: "Ada", scoreValue: 4, scoreLabel: "4 Taps", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 4, scoreLabel: "4 Taps", isWinner: true },
@@ -117,6 +119,7 @@ describe("Tapping Race", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
     });
   });
 
@@ -134,6 +137,7 @@ describe("Tapping Race", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1), d: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c", "d"],
+      tiedIds: [],
       result: board("Final Tap Counts", [
         { playerId: "a", playerName: "Ada", scoreValue: 6, scoreLabel: "6 Team Taps (5 Individually)", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 6, scoreLabel: "6 Team Taps (1 Individually)", isWinner: true },
@@ -155,6 +159,7 @@ describe("Tapping Race", () => {
       scores: { a: score(3), b: score(3), c: score(3), d: score(3) },
       winners: ["a", "b", "c", "d"],
       losers: [],
+      tiedIds: ["a", "b", "c", "d"],
     });
 
     const zeros = makeState({
@@ -170,6 +175,7 @@ describe("Tapping Race", () => {
       scores: { a: score(0, 1), b: score(0, 1), c: score(0, 1), d: score(0, 1) },
       winners: [],
       losers: ["a", "b", "c", "d"],
+      tiedIds: [],
     });
   });
 
@@ -186,6 +192,7 @@ describe("Tapping Race", () => {
       scores: { a: score(0, 1), b: score(3), c: score(3) },
       winners: ["b", "c"],
       losers: ["a"],
+      tiedIds: ["b", "c"],
     });
   });
 
@@ -202,6 +209,7 @@ describe("Tapping Race", () => {
       scores: { a: score(3), b: score(0, 1), c: score(0) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
     });
   });
 
@@ -221,6 +229,7 @@ describe("Tapping Race", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       gameScores: { a: 3, b: 2 },
       result: board("Final Tap Counts", [
         { playerId: "a", playerName: "Ada", scoreValue: 3, scoreLabel: "3 Taps", isWinner: true },
@@ -243,6 +252,7 @@ describe("Math Problem", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       result: {
         type: "timeline",
         title: "Math Breakdown",
@@ -265,6 +275,7 @@ describe("Math Problem", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c"],
+      tiedIds: ["a", "b"],
     });
   });
 
@@ -280,6 +291,7 @@ describe("Math Problem", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
     });
   });
 
@@ -297,6 +309,7 @@ describe("Math Problem", () => {
       scores: { a: score(3), b: score(3), c: score(3), d: score(3) },
       winners: ["a", "b", "c", "d"],
       losers: [],
+      tiedIds: ["a", "b", "c", "d"],
     });
 
     const zeros = makeState({
@@ -312,6 +325,7 @@ describe("Math Problem", () => {
       scores: { a: score(0, 1), b: score(0, 1), c: score(0, 1), d: score(0, 1) },
       winners: [],
       losers: ["a", "b", "c", "d"],
+      tiedIds: [],
     });
   });
 
@@ -327,6 +341,7 @@ describe("Math Problem", () => {
       scores: { a: score(0, 1), b: score(3) },
       winners: ["b"],
       losers: ["a"],
+      tiedIds: [],
       gameScores: { a: 2, b: 3 },
       result: {
         type: "timeline",
@@ -349,6 +364,7 @@ describe("Math Problem", () => {
       scores: { a: score(3), b: score(3) },
       winners: ["a", "b"],
       losers: [],
+      tiedIds: ["a", "b"],
       gameScores: { a: 3, b: 3 },
     });
   });
@@ -367,6 +383,7 @@ describe("Trivia", () => {
       scores: { a: score(3), b: score(3) },
       winners: ["a", "b"],
       losers: [],
+      tiedIds: ["a", "b"],
       result: {
         type: "timeline",
         title: "Trivia Breakdown",
@@ -388,6 +405,7 @@ describe("Trivia", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
     });
   });
 
@@ -405,6 +423,7 @@ describe("Trivia", () => {
       scores: { a: score(0, 1), b: score(0, 1), c: score(3), d: score(3) },
       winners: ["c", "d"],
       losers: ["a", "b"],
+      tiedIds: [],
     });
 
     const tied = makeState({
@@ -420,6 +439,7 @@ describe("Trivia", () => {
       scores: { a: score(3), b: score(3), c: score(3), d: score(3) },
       winners: ["a", "b", "c", "d"],
       losers: [],
+      tiedIds: ["a", "b", "c", "d"],
     });
   });
 
@@ -435,6 +455,7 @@ describe("Trivia", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       gameScores: { a: 2, b: 1 },
     });
   });
@@ -459,6 +480,7 @@ describe("Hot Potato", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       result: {
         type: "elimination",
         title: "Potato Explosion",
@@ -485,6 +507,7 @@ describe("Hot Potato", () => {
       scores: { a: score(3), b: score(0, 1), c: score(3) },
       winners: ["a", "c"],
       losers: ["b"],
+      tiedIds: [],
       result: {
         type: "elimination",
         title: "Potato Explosion",
@@ -513,6 +536,7 @@ describe("Hot Potato", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1), d: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c", "d"],
+      tiedIds: [],
     });
   });
 });
@@ -540,6 +564,7 @@ describe("Lumber Cut", () => {
         scores: Object.fromEntries(ids.map((id) => [id, score(3)])),
         winners: ids,
         losers: [],
+        tiedIds: ids,
         ...(type === "1v1"
           ? {
               result: board("Lumber Cut Results", [
@@ -570,6 +595,7 @@ describe("Lumber Cut", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       result: board("Lumber Cut Results", [
         { playerId: "a", playerName: "Ada", scoreValue: 20, scoreLabel: "20% Cut", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 5, scoreLabel: "5% Cut", isWinner: false },
@@ -595,6 +621,7 @@ describe("Lumber Cut", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c"],
+      tiedIds: ["a", "b"],
     });
   });
 
@@ -616,6 +643,7 @@ describe("Lumber Cut", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
     });
     const data = JSON.parse(player(state, "a").gameData);
     assert.equal(data.teams[0].pairs, 1.5);
@@ -636,6 +664,8 @@ describe("Lumber Cut", () => {
       scores: { a: score(9), b: { score: 4, drinks: 2 } },
       winners: ["stale"],
       losers: [],
+      tiedIds: [],
+      preservesPriorResolution: true,
     });
     assert.equal(state.lastGameResult, "keep");
   });
@@ -670,6 +700,7 @@ describe("Rock Paper Scissors", () => {
         scores: { a: score(3), b: score(0, 1) },
         winners: ["a"],
         losers: ["b"],
+        tiedIds: [],
         result: {
           type: "elimination",
           title: "RPS Results",
@@ -699,6 +730,7 @@ describe("Rock Paper Scissors", () => {
         scores: { a: score(0, 1), b: score(0, 1) },
         winners: [],
         losers: ["a", "b"],
+        tiedIds: ["a", "b"],
         result: {
           type: "elimination",
           title: "RPS Results",
@@ -723,6 +755,7 @@ describe("Rock Paper Scissors", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: ["a", "b"],
       result: {
         type: "elimination",
         title: "RPS Results",
@@ -752,6 +785,7 @@ describe("Rock Paper Scissors", () => {
         scores: { a: score(3), b: score(0, 1), c: { score: 11, drinks: 4 } },
         winners: ["a"],
         losers: ["b"],
+        tiedIds: [],
         result: {
           type: "elimination",
           title: "RPS Results",
@@ -781,6 +815,8 @@ describe("Rock Paper Scissors", () => {
       scores: { a: score(8), b: { score: 2, drinks: 1 } },
       winners: ["stale"],
       losers: [],
+      tiedIds: [],
+      preservesPriorResolution: true,
     });
     assert.equal(state.lastGameResult, "keep");
   });
@@ -807,6 +843,7 @@ describe("Cyclone", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       result: board("Cyclone Precision", [
         { playerId: "a", playerName: "Ada", scoreValue: 0, scoreLabel: "BULLSEYE!", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: -5, scoreLabel: "Missed by 5", isWinner: false },
@@ -830,6 +867,7 @@ describe("Cyclone", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c"],
+      tiedIds: ["a", "b"],
     });
   });
 
@@ -847,6 +885,7 @@ describe("Cyclone", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
       result: board("Cyclone Precision", [
         { playerId: "a", playerName: "Ada", scoreValue: -999, scoreLabel: "Timeout", isWinner: false },
         { playerId: "b", playerName: "Bea", scoreValue: -999, scoreLabel: "Timeout", isWinner: false },
@@ -874,6 +913,7 @@ describe("Cyclone", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1), d: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c", "d"],
+      tiedIds: [],
     });
 
     const tied = makeState({
@@ -892,6 +932,7 @@ describe("Cyclone", () => {
       scores: { a: score(3), b: score(3), c: score(3), d: score(3) },
       winners: ["a", "b", "c", "d"],
       losers: [],
+      tiedIds: ["a", "b", "c", "d"],
     });
 
     const timeout = makeState({
@@ -909,6 +950,7 @@ describe("Cyclone", () => {
       scores: { a: score(0, 1), b: score(0, 1), c: score(0, 1), d: score(0, 1) },
       winners: [],
       losers: ["a", "b", "c", "d"],
+      tiedIds: [],
     });
   });
 });
@@ -934,6 +976,7 @@ describe("Balloon Inflate", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       result: board("Balloon Sizes", [
         { playerId: "a", playerName: "Ada", scoreValue: 12, scoreLabel: "12%", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 4, scoreLabel: "4%", isWinner: false },
@@ -957,6 +1000,7 @@ describe("Balloon Inflate", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c"],
+      tiedIds: ["a", "b"],
     });
   });
 
@@ -974,6 +1018,7 @@ describe("Balloon Inflate", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
     });
   });
 
@@ -994,6 +1039,7 @@ describe("Balloon Inflate", () => {
       scores: { a: score(3), b: score(0, 1), c: score(0, 1) },
       winners: ["a"],
       losers: ["b", "c"],
+      tiedIds: [],
       result: board("Balloon Sizes", [
         { playerId: "a", playerName: "Ada", scoreValue: 100, scoreLabel: "POPPED", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 8, scoreLabel: "8%", isWinner: false },
@@ -1018,6 +1064,7 @@ describe("Balloon Inflate", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       result: board("Balloon Sizes", [
         { playerId: "a", playerName: "Ada", scoreValue: 6, scoreLabel: "6%", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 4, scoreLabel: "4%", isWinner: false },
@@ -1044,6 +1091,7 @@ describe("Balloon Inflate", () => {
       scores: { a: score(3), b: score(3), c: score(3), d: score(3) },
       winners: ["a", "b", "c", "d"],
       losers: [],
+      tiedIds: ["a", "b", "c", "d"],
     });
 
     const popped = makeState({
@@ -1062,6 +1110,7 @@ describe("Balloon Inflate", () => {
       scores: { a: score(0, 1), b: score(0, 1), c: score(3), d: score(3) },
       winners: ["c", "d"],
       losers: ["a", "b"],
+      tiedIds: [],
       result: board("Balloon Sizes", [
         { playerId: "c", playerName: "Cal", scoreValue: 100, scoreLabel: "POPPED", isWinner: true },
         { playerId: "d", playerName: "Dee", scoreValue: 100, scoreLabel: "POPPED", isWinner: true },
@@ -1085,6 +1134,7 @@ describe("Balloon Inflate", () => {
       scores: { a: score(0, 1), b: score(0, 1), c: score(0, 1), d: score(0, 1) },
       winners: [],
       losers: ["a", "b", "c", "d"],
+      tiedIds: [],
     });
   });
 });
@@ -1108,6 +1158,7 @@ describe("Simon Says", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c"],
+      tiedIds: ["a", "b"],
       result: board("Simon Says Results", [
         { playerId: "a", playerName: "Ada", scoreValue: 3, scoreLabel: "Survived 3 Rounds", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 3, scoreLabel: "Survived 3 Rounds", isWinner: true },
@@ -1129,6 +1180,7 @@ describe("Simon Says", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
     });
 
     const wipeout = makeState({
@@ -1143,6 +1195,7 @@ describe("Simon Says", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
     });
   });
 
@@ -1160,6 +1213,7 @@ describe("Simon Says", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c"],
+      tiedIds: ["a", "b"],
     });
   });
 });
@@ -1177,6 +1231,7 @@ describe("Scrabble", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       result: board("Scrabble Results", [
         { playerId: "a", playerName: "Ada", scoreValue: 8, scoreLabel: "8 Points", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 3, scoreLabel: "3 Points", isWinner: false },
@@ -1195,6 +1250,7 @@ describe("Scrabble", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c"],
+      tiedIds: ["a", "b"],
     });
 
     const blank = makeState({
@@ -1208,6 +1264,7 @@ describe("Scrabble", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
     });
   });
 
@@ -1225,6 +1282,7 @@ describe("Scrabble", () => {
       scores: { a: score(3), b: score(3), c: score(3), d: score(3) },
       winners: ["a", "b", "c", "d"],
       losers: [],
+      tiedIds: ["a", "b", "c", "d"],
       result: board("Scrabble Results", [
         { playerId: "a", playerName: "Ada", scoreValue: 4, scoreLabel: "4 Points (Team: 5)", isWinner: true },
         { playerId: "c", playerName: "Cal", scoreValue: 3, scoreLabel: "3 Points (Team: 5)", isWinner: true },
@@ -1246,6 +1304,7 @@ describe("Scrabble", () => {
       scores: { a: score(0, 1), b: score(0, 1), c: score(0, 1), d: score(0, 1) },
       winners: [],
       losers: ["a", "b", "c", "d"],
+      tiedIds: [],
     });
   });
 
@@ -1269,6 +1328,7 @@ describe("Scrabble", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       gameScores: { a: 5, b: 2 },
     });
   });
@@ -1288,6 +1348,7 @@ describe("Screen Painting", () => {
       scores: { a: score(3), b: score(0, 1), c: score(0, 1) },
       winners: ["a"],
       losers: ["b", "c"],
+      tiedIds: ["a", "b", "c"],
       result: board("Painting Race Results", [
         { playerId: "a", playerName: "Ada", scoreValue: 50, scoreLabel: "50% Painted", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 50, scoreLabel: "50% Painted", isWinner: false },
@@ -1307,6 +1368,7 @@ describe("Screen Painting", () => {
       scores: { a: score(0, 1), b: score(3), c: score(0, 1) },
       winners: ["b"],
       losers: ["a", "c"],
+      tiedIds: ["b", "c"],
     });
   });
 
@@ -1322,6 +1384,7 @@ describe("Screen Painting", () => {
       scores: { a: score(0, 1), b: score(3) },
       winners: ["b"],
       losers: ["a"],
+      tiedIds: [],
     });
   });
 
@@ -1337,6 +1400,7 @@ describe("Screen Painting", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
     });
   });
 
@@ -1355,6 +1419,7 @@ describe("Screen Painting", () => {
       scores: { a: score(0, 1), b: score(3), c: score(0, 1) },
       winners: ["b"],
       losers: ["a", "c"],
+      tiedIds: [],
       gameScores: { a: 90, b: 100, c: 10 },
     });
   });
@@ -1374,6 +1439,7 @@ describe("Perfection", () => {
       scores: { a: score(3), b: score(3), c: score(0, 1) },
       winners: ["a", "b"],
       losers: ["c"],
+      tiedIds: ["a", "b"],
       result: board("Perfection Placement Results", [
         { playerId: "a", playerName: "Ada", scoreValue: 8, scoreLabel: "8 Matched", isWinner: true },
         { playerId: "b", playerName: "Bea", scoreValue: 8, scoreLabel: "8 Matched", isWinner: true },
@@ -1392,6 +1458,7 @@ describe("Perfection", () => {
       scores: { a: score(0, 1), b: score(3) },
       winners: ["b"],
       losers: ["a"],
+      tiedIds: [],
     });
   });
 
@@ -1407,6 +1474,7 @@ describe("Perfection", () => {
       scores: { a: score(0, 1), b: score(0, 1) },
       winners: [],
       losers: ["a", "b"],
+      tiedIds: [],
     });
   });
 
@@ -1426,6 +1494,7 @@ describe("Perfection", () => {
       scores: { a: score(3), b: score(0, 1) },
       winners: ["a"],
       losers: ["b"],
+      tiedIds: [],
       gameScores: { a: 16, b: 3 },
     });
   });
@@ -1507,5 +1576,31 @@ describe("Double Points", () => {
     resolveRound(state);
     assert.equal(player(state, "a").score, 3);
     assert.equal(player(state, "b").drinks, 1);
+  });
+});
+
+describe("LobbyRoom", () => {
+  it("applies +3 per winner and one drink per loser from the game result", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada", gameScore: 7 },
+        { id: "b", name: "Bea", gameScore: 2 },
+        { id: "c", name: "Cal", gameScore: 2 },
+      ],
+    });
+    const room = new LobbyRoom();
+    room.setState(state);
+    room.activeGame = new TappingRace();
+    room.applyActiveGameResult();
+
+    assert.equal(player(state, "a").score, 3);
+    assert.equal(player(state, "b").score, 0);
+    assert.equal(player(state, "c").score, 0);
+    assert.equal(player(state, "a").drinks, 0);
+    assert.equal(player(state, "b").drinks, 1);
+    assert.equal(player(state, "c").drinks, 1);
+    assert.deepEqual(state.lastWinners.toArray(), ["a"]);
+    assert.deepEqual(state.lastLosers.toArray(), ["b", "c"]);
   });
 });
