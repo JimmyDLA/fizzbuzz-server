@@ -322,8 +322,9 @@ describe("pot split", () => {
       const large = splitPot(tiedFirst, 6, stakes);
       // a and b share (3+2)/2 = 2.5. Pot 3 leaves c the larger remainder, so c takes the point.
       assert.deepEqual(small.map((share) => share.payout), [1, 1, 1]);
-      // Pot 6 floors to 2, 2, 1. The tie of 2 does not fit the last point, and c's group of 1 does.
-      assert.deepEqual(large.map((share) => share.payout), [2, 2, 2]);
+      // Pot 6 floors to 2, 2, 1. c's remainder is 0, so the pass skips c. The tie does not
+      // fit the last point, and the fallback gives it to a.
+      assert.deepEqual(large.map((share) => share.payout), [3, 2, 1]);
       assert.deepEqual(small.map((share) => share.rank), [1, 1, 3]);
       assert.equal(small.reduce((sum, share) => sum + share.payout, 0), 3);
       assert.equal(large.reduce((sum, share) => sum + share.payout, 0), 6);
@@ -428,6 +429,23 @@ describe("pot split", () => {
     );
     assert.deepEqual(everyone.map((share) => share.payout), [3, 3, 3, 3, 3, 3]);
     assert.equal(splitPot(distinctPlacements(4), 0).every((share) => share.payout === 0), true);
+  });
+
+  it("pays the exact share when every remainder is 0", () => {
+    const tied = splitPot(
+      [
+        { playerId: "a", standing: 1 },
+        { playerId: "b", standing: 1 },
+        { playerId: "c", standing: 1 },
+      ],
+      6,
+    );
+    assert.deepEqual(tied.map((share) => share.payout), [2, 2, 2]);
+    assert.equal(tied.reduce((sum, share) => sum + share.payout, 0), 6);
+
+    const distinct = splitPot(distinctPlacements(2), 6);
+    assert.deepEqual(distinct.map((share) => share.payout), [4, 2]);
+    assert.equal(distinct.reduce((sum, share) => sum + share.payout, 0), 6);
   });
 
   it("weights the share by the stake and pays 0 to a player who staked 0", () => {

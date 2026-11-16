@@ -183,9 +183,10 @@ function lcm(a: number, b: number): number {
  * Exact share is pot × (stake × weight) / Σ(stake × weight). Omit `stakes`
  * to give every player a stake of 1, which is the plain-rank split.
  * Each player is floored. One leftover pass visits rank groups by fractional
- * remainder, highest first, and a better rank wins a remainder tie. A group
- * receives +1 per eligible member only when the leftover covers the whole
- * group. In the stake-weighted split only members with a stake above 0 are
+ * remainder, highest first, and a better rank wins a remainder tie. Only a
+ * group whose remainder is above 0 can take points, and only when the leftover
+ * covers every eligible member. A zero remainder is never given points in the
+ * pass. In the stake-weighted split only members with a stake above 0 are
  * eligible. Anything still left goes out one point at a time by earliest
  * input order, starting with the highest-remainder group that was skipped.
  * That fallback is the only time tied players differ by 1. The shares add
@@ -299,6 +300,7 @@ export function splitPot(
   const skipped: typeof byRemainder = [];
   const awarded: typeof byRemainder = [];
   for (const group of byRemainder) {
+    if (group.remainder <= 0) continue;
     if (leftover < group.eligible.length) {
       skipped.push(group);
       continue;
