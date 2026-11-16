@@ -557,6 +557,46 @@ describe("pot split", () => {
     assert.deepEqual(none.map((share) => share.payout), [0, 0, 0]);
   });
 
+  it("pays a tied 2-stake and 1-stake 1 each from pot 2 in either seat order", () => {
+    const stake2First = splitPot(
+      [
+        { playerId: "a", standing: 1 },
+        { playerId: "b", standing: 1 },
+      ],
+      2,
+      { a: 2, b: 1 },
+    );
+    const stake1First = splitPot(
+      [
+        { playerId: "b", standing: 1 },
+        { playerId: "a", standing: 1 },
+      ],
+      2,
+      { a: 2, b: 1 },
+    );
+    // Weights average 3/2. Shares are 12/9 and 6/9, so the stake of 1 keeps the
+    // larger remainder (6 against 3) and takes the leftover point in both orders.
+    assert.deepEqual(stake2First.map((share) => share.payout), [1, 1]);
+    assert.deepEqual(stake1First.map((share) => share.payout), [1, 1]);
+    assert.deepEqual(stake2First.map((share) => share.playerId), ["a", "b"]);
+    assert.deepEqual(stake1First.map((share) => share.playerId), ["b", "a"]);
+    assert.equal(stake2First.reduce((sum, share) => sum + share.payout, 0), 2);
+    assert.equal(stake1First.reduce((sum, share) => sum + share.payout, 0), 2);
+  });
+
+  it("pays the eight-player board by largest remainder inside the tie", () => {
+    const standings = [3, 10, 7, 5, 10, 10, 2, 10];
+    const placements = standings.map((standing, index) => ({ playerId: `p${index}`, standing }));
+    const stakes = { p0: 0, p1: 3, p2: 0, p3: 0, p4: 3, p5: 3, p6: 3, p7: 2 };
+    const shares = splitPot(placements, 5, stakes);
+    const byId = Object.fromEntries(shares.map((share) => [share.playerId, share.payout]));
+    // Tied top is p1, p4, p5, p7. Their floors are 1, 1, 1, 0. p7's remainder
+    // is 130/149 and the stake-3 leaders are at 46/149, so p7 takes the tie's
+    // leftover point. p6 is alone in last and is paid the other point.
+    assert.deepEqual(placements.map((placement) => byId[placement.playerId]), [0, 1, 0, 0, 1, 1, 1, 1]);
+    assert.equal(shares.reduce((sum, share) => sum + share.payout, 0), 5);
+  });
+
   it("keeps equal-stake tied leaders within 1 across random boards", () => {
     let seed = 0x6d2b79f5;
     const rand = () => {
@@ -588,7 +628,190 @@ describe("pot split", () => {
       }
     }
   });
+
+  it("pays out exactly the pot when stakes differ", () => {
+    let seed = 0x6d2b79f6;
+    const rand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    for (let trial = 0; trial < 20000; trial += 1) {
+      const count = 2 + Math.floor(rand() * 11);
+      const placements = Array.from({ length: count }, (_, index) => ({
+        playerId: `p${index}`,
+        standing: Math.floor(rand() * 16),
+      }));
+      const pot = Math.floor(rand() * 40);
+      const stakes: Record<string, number> = {};
+      // A board with every stake at 0 has no weight to divide, so redraw until
+      // someone staked. The payouts of that board add up to the pot.
+      do {
+        for (const placement of placements) stakes[placement.playerId] = Math.floor(rand() * 4);
+      } while (Object.values(stakes).every((stake) => stake === 0));
+      const shares = splitPot(placements, pot, stakes);
+      assert.equal(
+        shares.reduce((sum, share) => sum + share.payout, 0),
+        pot,
+        `trial ${trial} standings ${placements.map((placement) => placement.standing).join(",")} pot ${pot} stakes ${placements.map((placement) => stakes[placement.playerId]).join(",")} pays ${shares.map((share) => share.payout).join(",")}`,
+      );
+    }
+  });
+
+  it("preserves payouts when tied seats move, except an exact-remainder cohort", () => {
+    let seed = 0x6d2b79f7;
+    const rand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    for (let trial = 0; trial < 5000; trial += 1) {
+      const count = 2 + Math.floor(rand() * 11);
+      const placements = Array.from({ length: count }, (_, index) => ({
+        playerId: `p${index}`,
+        standing: Math.floor(rand() * 16),
+      }));
+      const pot = Math.floor(rand() * 40);
+      const stakes: Record<string, number> = {};
+      for (const placement of placements) stakes[placement.playerId] = Math.floor(rand() * 4);
+      const before = payoutsById(splitPot(placements, pot, stakes));
+      const permuted = permuteTiedSeats(placements, rand);
+      const after = payoutsById(splitPot(permuted, pot, stakes));
+      const parts = integerShares(placements, pot, stakes);
+      const stakeTotal = Object.values(stakes).reduce((sum, stake) => sum + stake, 0);
+      const detail = `trial ${trial} standings ${placements.map((entry) => entry.standing).join(",")} pot ${pot} stakes ${placements.map((entry) => stakes[entry.playerId]).join(",")}`;
+      if (stakeTotal > 0) {
+        assert.equal(Object.values(before).reduce((sum, payout) => sum + payout, 0), pot, `${detail} sum`);
+        assert.equal(Object.values(after).reduce((sum, payout) => sum + payout, 0), pot, `${detail} permuted sum`);
+      }
+      const byStanding = new Map<number, typeof placements>();
+      for (const placement of placements) {
+        const group = byStanding.get(placement.standing) ?? [];
+        group.push(placement);
+        byStanding.set(placement.standing, group);
+      }
+      for (const group of byStanding.values()) {
+        const cohorts = new Map<number, string[]>();
+        for (const placement of group) {
+          if (stakes[placement.playerId] <= 0) continue;
+          const remainder = parts.get(placement.playerId)?.remainder ?? 0;
+          const ids = cohorts.get(remainder) ?? [];
+          ids.push(placement.playerId);
+          cohorts.set(remainder, ids);
+        }
+        const inCohort = new Set<string>();
+        for (const ids of cohorts.values()) {
+          if (ids.length < 2) continue;
+          ids.forEach((id) => inCohort.add(id));
+          const extras = (payouts: Record<string, number>) => ids
+            .map((id) => payouts[id] - (parts.get(id)?.floor ?? 0))
+            .sort((left, right) => left - right)
+            .join(",");
+          assert.equal(extras(after), extras(before), `${detail} cohort ${ids.join("+")}`);
+        }
+        for (const placement of group) {
+          if (inCohort.has(placement.playerId)) continue;
+          assert.equal(after[placement.playerId], before[placement.playerId], `${detail} ${placement.playerId}`);
+        }
+      }
+    }
+  });
 });
+
+function payoutsById(shares: readonly { playerId: string; payout: number }[]): Record<string, number> {
+  return Object.fromEntries(shares.map((share) => [share.playerId, share.payout]));
+}
+
+function permuteTiedSeats(
+  placements: readonly { playerId: string; standing: number }[],
+  rand: () => number,
+): Array<{ playerId: string; standing: number }> {
+  const next = placements.map((placement) => ({ ...placement }));
+  const groups = new Map<number, number[]>();
+  next.forEach((placement, index) => {
+    const seats = groups.get(placement.standing) ?? [];
+    seats.push(index);
+    groups.set(placement.standing, seats);
+  });
+  for (const seats of groups.values()) {
+    for (let cursor = seats.length - 1; cursor > 0; cursor -= 1) {
+      const swap = Math.floor(rand() * (cursor + 1));
+      const left = seats[cursor];
+      const right = seats[swap];
+      const hold = next[left];
+      next[left] = next[right];
+      next[right] = hold;
+    }
+  }
+  return next;
+}
+
+/** Floor and remainder from the initial stake-weighted split. Seat order inside a tie does not change either. */
+function integerShares(
+  placements: readonly { playerId: string; standing: number }[],
+  pot: number,
+  stakes: Readonly<Record<string, number>>,
+): Map<string, { floor: number; remainder: number }> {
+  const shares = new Map<string, { floor: number; remainder: number }>();
+  const n = placements.length;
+  const safePot = Number.isFinite(pot) ? Math.max(0, Math.floor(pot)) : 0;
+  const ordered = placements.map((placement, order) => ({
+    playerId: placement.playerId,
+    standing: placement.standing,
+    order,
+    stake: Math.max(0, Math.floor(stakes[placement.playerId] ?? 0)),
+  }));
+  ordered.sort((a, b) => {
+    if (a.standing !== b.standing) return b.standing - a.standing;
+    return a.order - b.order;
+  });
+  const members: Array<{ playerId: string; stake: number; weightNum: number; weightDen: number }> = [];
+  let index = 0;
+  while (index < ordered.length) {
+    let end = index + 1;
+    while (end < ordered.length && ordered[end].standing === ordered[index].standing) end += 1;
+    const rank = index + 1;
+    const groupSize = end - index;
+    let weightSum = 0;
+    for (let offset = 0; offset < groupSize; offset += 1) {
+      weightSum += n - (rank + offset) + 1;
+    }
+    const divisor = gcdInt(weightSum, groupSize);
+    for (let cursor = index; cursor < end; cursor += 1) {
+      members.push({
+        playerId: ordered[cursor].playerId,
+        stake: ordered[cursor].stake,
+        weightNum: weightSum / divisor,
+        weightDen: groupSize / divisor,
+      });
+    }
+    index = end;
+  }
+  const scale = members.reduce((acc, member) => lcmInt(acc, member.weightDen), 1);
+  const scaledWeight = members.map((member) => member.stake * member.weightNum * (scale / member.weightDen));
+  const weightTotal = scaledWeight.reduce((sum, value) => sum + value, 0);
+  members.forEach((member, memberIndex) => {
+    const numerator = safePot * scaledWeight[memberIndex];
+    shares.set(member.playerId, {
+      floor: weightTotal === 0 || safePot === 0 ? 0 : Math.floor(numerator / weightTotal),
+      remainder: weightTotal === 0 || safePot === 0 ? 0 : numerator % weightTotal,
+    });
+  });
+  return shares;
+}
+
+function gcdInt(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const next = x % y;
+    x = y;
+    y = next;
+  }
+  return x || 1;
+}
+
+function lcmInt(a: number, b: number): number {
+  return (a / gcdInt(a, b)) * b;
+}
 
 describe("betting round resolution", () => {
   it("pays the 6-player example, skips +3, and still hands out drinks", () => {

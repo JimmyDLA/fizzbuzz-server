@@ -187,17 +187,19 @@ function lcm(a: number, b: number): number {
  * group whose remainder is above 0 can take points, and only when the leftover
  * covers every eligible member. A zero remainder is never given points in the
  * pass. In the stake-weighted split only members with a stake above 0 are
- * eligible. Anything still left goes out one point at a time by earliest
- * input order, starting with the highest-remainder group that was skipped.
- * That fallback is the only time the split itself leaves tied players 1 apart.
+ * eligible. A covered group is awarded whole, walked from the largest original
+ * remainder to the smallest. Earliest input order breaks a remainder tie.
  * A leftover point that would pay a worse place more than a better place who
- * staked at least as much is redirected to the tied top group. Redirects and
- * one-at-a-time points that land on that group share one rotation, earliest
- * selection first, and the rotation carries from the remainder pass into the
- * fallback. A group award that pays every tied top player does not move it.
- * Equal-stake tied top players therefore never differ by more than 1. A worse
- * place with a higher stake may still receive more than a better place. The
- * shares add up to `pot`.
+ * staked at least as much is redirected to the tied top group. Redirected
+ * points count for whoever receives them, and the group's leftover still drops
+ * by its eligible size. Anything still left goes out one point per group per
+ * pass: skipped groups first, then awarded groups, wrapping while points
+ * remain. That point goes to the member with the fewest leftover points so
+ * far, then the largest original remainder, then the earliest input order.
+ * Remainders stay the numerators from the initial floor. Equal stakes share a
+ * remainder, so the fewest-points rule keeps those tied leaders within 1. A
+ * worse place with a higher stake may still receive more than a better place.
+ * The shares add up to `pot`.
  */
 export function splitPot(
   placements: readonly Placement[],
@@ -289,16 +291,22 @@ export function splitPot(
     extra.set(member.playerId, (extra.get(member.playerId) ?? 0) + 1);
   };
   const payoutOf = (member: Member) => member.floor + (extra.get(member.playerId) ?? 0);
+  const received = (member: Member) => extra.get(member.playerId) ?? 0;
   const eligibleIn = (group: Member[]) => group
     .filter((member) => member.stake > 0)
-    .sort((a, b) => a.order - b.order);
+    .sort((a, b) => {
+      if (a.remainder !== b.remainder) return b.remainder - a.remainder;
+      return a.order - b.order;
+    });
+  /** Fewest leftover points, then largest original remainder, then earliest seat. */
+  const pickLeftover = (eligible: readonly Member[]) => eligible.reduce((best, member) => {
+    const receivedDiff = received(member) - received(best);
+    if (receivedDiff !== 0) return receivedDiff < 0 ? member : best;
+    if (member.remainder !== best.remainder) return member.remainder > best.remainder ? member : best;
+    return member.order < best.order ? member : best;
+  });
   const topEligible = eligibleIn(groups[0] ?? []);
-  let topTurn = 0;
-  const giveNextTop = () => {
-    give(topEligible[topTurn % topEligible.length]);
-    topTurn += 1;
-  };
-  const givePreservingOrder = (member: Member, spreadAcrossTop: boolean) => {
+  const giveWithGuard = (member: Member) => {
     const next = payoutOf(member) + 1;
     const overtakesBetterPlace = members.some((other) => (
       other.stake > 0
@@ -306,13 +314,9 @@ export function splitPot(
       && member.stake <= other.stake
       && payoutOf(other) < next
     ));
-    const inTopGroup = topEligible.some((top) => top === member);
+    const inTopGroup = topEligible.includes(member);
     if (overtakesBetterPlace && topEligible.length > 0 && !inTopGroup) {
-      giveNextTop();
-      return;
-    }
-    if (spreadAcrossTop && inTopGroup) {
-      giveNextTop();
+      give(pickLeftover(topEligible));
       return;
     }
     give(member);
@@ -338,15 +342,16 @@ export function splitPot(
       skipped.push(group);
       continue;
     }
-    for (const member of group.eligible) givePreservingOrder(member, false);
+    for (const member of group.eligible) giveWithGuard(member);
     leftover -= group.eligible.length;
     awarded.push(group);
   }
 
-  const oneAtATime = [...skipped, ...awarded].flatMap((group) => group.eligible);
+  const oneAtATime = [...skipped, ...awarded];
   let cursor = 0;
   while (leftover > 0 && oneAtATime.length > 0) {
-    givePreservingOrder(oneAtATime[cursor % oneAtATime.length], true);
+    const chosen = pickLeftover(oneAtATime[cursor % oneAtATime.length].eligible);
+    giveWithGuard(chosen);
     leftover -= 1;
     cursor += 1;
   }
