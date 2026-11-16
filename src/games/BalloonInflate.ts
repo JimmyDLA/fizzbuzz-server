@@ -225,10 +225,16 @@ export class BalloonInflate implements IMiniGame {
       leaderboard
     });
 
+    const actionScores: Record<string, number> = {};
+    results.forEach(r => {
+      actionScores[r.id] = r.size;
+    });
+
     return {
       winners: state.lastWinners.toArray(),
       losers: state.lastLosers.toArray(),
       tiedIds,
+      actionScores,
     };
   }
 }
