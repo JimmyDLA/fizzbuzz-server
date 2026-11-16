@@ -511,6 +511,8 @@ describe("after the player picks", () => {
     assert.deepEqual(hand(player), ["RESPIN"]);
 
     room.state.phase = "lobby";
+    const { player: bea } = addPlayer(room, "bea", "Bea");
+    bea.isReady = true;
     emit(room, "ready", "ada", { isReady: true });
     assert.equal(room.state.phase, "chart");
     assert.equal(player.isReady, false);
