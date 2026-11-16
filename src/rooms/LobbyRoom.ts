@@ -13,7 +13,21 @@ import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
-import { applyDoublePoints, applyStandardScoring } from "./scoring";
+import { applyDoublePoints, applyDrinks, applyStandardScoring } from "./scoring";
+import {
+  BETTING_PAYOUT_EVENT,
+  BETTING_ROUND_EVENT,
+  BettingPayoutPayload,
+  BettingPayoutReason,
+  BettingPayoutView,
+  BettingRoundPayload,
+  BettingWagerView,
+  isBettingRound,
+  isNoActionResult,
+  splitPot,
+  standingsForPlayers,
+  wagerForPoints,
+} from "./betting";
 import { MAX_ROOM_PLAYERS, connectedPlayerIds, hasEnoughConnectedPlayers } from "./connectedPlayers";
 import { LOBBY_ERROR_EVENT, invalidRoundsError, notEnoughPlayersError, notHostError, roundsLockedError } from "./lobbyErrors";
 import {
@@ -61,6 +75,12 @@ export class LobbyRoom extends Room {
   private matchOver: boolean = false;
   /** Session ids inside the reconnect grace window. They hold a seat until they return or the window ends. */
   private graceSessionIds = new Set<string>();
+  /** Stakes have been removed from score for the current betting round. */
+  private bettingLocked = false;
+  /** The pot has been paid or refunded by a game result. Abort will not return it again. */
+  private bettingSettled = false;
+  /** Players who staked this betting round, in selected order. */
+  private bettingPlayerIds: string[] = [];
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -207,19 +227,30 @@ export class LobbyRoom extends Room {
           player.cards.splice(cardIndex, 1);
 
           const category = message.category || CATEGORIES[0];
-          const selectedPlayers = message.selectedPlayers || connectedPlayerIds(this.state.players).slice(0, 2);
-          const type = message.type || (selectedPlayers.length === 2 ? "1v1" : selectedPlayers.length === 4 ? "2v2" : "BR");
+          const betting = this.roundWillBeBetting();
+          // A betting round stays Battle Royale. The card can still pick the game.
+          const selectedPlayers = betting
+            ? connectedPlayerIds(this.state.players)
+            : (message.selectedPlayers || connectedPlayerIds(this.state.players).slice(0, 2));
+          const type = betting
+            ? "BR"
+            : (message.type || (selectedPlayers.length === 2 ? "1v1" : selectedPlayers.length === 4 ? "2v2" : "BR"));
 
           // Reset ready status for all players
           this.clearReadyFlags();
+
+          const description = betting
+            ? `${player.name} played WILD CARD: ${category} stays Battle Royale.`
+            : `${player.name} played WILD CARD: Game set to ${category}!`;
 
           // Broadcast card announcement to all clients
           this.broadcast("CardUsedEvent", {
             userId: client.sessionId,
             playerName: player.name,
             cardId: "WILD CARD",
-            description: `${player.name} played WILD CARD: Game set to ${category}!`,
-            message: `${player.name} played WILD CARD: Game set to ${category}!`
+            description,
+            message: description,
+            ...(betting ? { forcedBattleRoyale: true } : {}),
           });
 
           // Wait 3 seconds for card popup animation, then force wheel state.
@@ -422,7 +453,9 @@ export class LobbyRoom extends Room {
     this.state.lastWinners.clear();
     this.state.lastLosers.clear();
     this.state.lastGameResult = "";
-    // The round did not resolve. The chart shows the same number so it can be replayed.
+    // The round did not resolve. Return any betting stakes, then show the same
+    // number so the round can be replayed.
+    this.refundUnsettledBetting("aborted");
     this.roundInProgress = false;
     this.showUpcomingRound();
   }
@@ -701,7 +734,8 @@ export class LobbyRoom extends Room {
       } else if (this.state.phase === "chart") {
         // No timer and no host override. A card play in flight keeps the Wild Card window.
         // The round number advances in beginRound(), which the wheel calls once.
-        // Betting (every 5th round, including a final multiple of 5) hooks there.
+        // A betting round (roundCount % 5 === 0, including a final multiple of 5)
+        // forces Battle Royale and locks wagers in that same start.
         if (this.isCardLocked || !hasEnoughConnectedPlayers(this.state.players)) {
           return;
         }
@@ -721,9 +755,8 @@ export class LobbyRoom extends Room {
   /**
    * Mark the displayed round as started. The chart already shows this number,
    * so a spin, respin, or wild-card replacement does not advance it again.
-   * This is the only start-of-round hook. Betting reads `state.roundCount`
-   * (a positive multiple of 5, including when that round is the last one)
-   * before the wheel result is committed.
+   * This is the only start-of-round hook. A betting round is
+   * `roundCount % 5 === 0`, including when that round is the last one.
    */
   private beginRound(): void {
     if (this.matchOver || this.roundInProgress) return;
@@ -731,6 +764,7 @@ export class LobbyRoom extends Room {
     if (this.state.roundCount < upcomingRoundNumber(this.resolvedRounds)) {
       this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
     }
+    this.state.isBettingRound = isBettingRound(this.state.roundCount);
   }
 
   /** Point the chart at the round that will be played next. */
@@ -738,6 +772,22 @@ export class LobbyRoom extends Room {
     if (this.matchOver) return;
     if (this.resolvedRounds >= this.state.totalRounds) return;
     this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
+    this.state.isBettingRound = isBettingRound(this.state.roundCount);
+    // The next chart is a new round. Drop the previous pot unless stakes for
+    // this same round are still locked (an abort refunds those first).
+    if (!this.bettingLocked) this.resetBettingDisplay();
+  }
+
+  /**
+   * The round the next wheel start will play. A spin already in progress
+   * keeps its number. The chart's roundCount is that number before the spin.
+   */
+  private roundWillBeBetting(): boolean {
+    if (this.matchOver) return false;
+    const round = this.roundInProgress
+      ? this.state.roundCount
+      : Math.max(this.state.roundCount, upcomingRoundNumber(this.resolvedRounds));
+    return isBettingRound(round);
   }
 
   /**
@@ -751,8 +801,15 @@ export class LobbyRoom extends Room {
       this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
     }
     this.roundInProgress = false;
+    this.state.isBettingRound = isBettingRound(this.state.roundCount);
+    // A round that never got a game result gives the stakes back. A settled
+    // betting round, including a final one, keeps its payout for the podium.
+    this.refundUnsettledBetting("unresolved");
     this.resolvedRounds = this.state.roundCount;
     this.clearReadyFlags();
+    this.bettingLocked = false;
+    this.bettingSettled = false;
+    this.bettingPlayerIds = [];
     if (this.resolvedRounds >= this.state.totalRounds) {
       this.endMatch();
       return;
@@ -816,6 +873,7 @@ export class LobbyRoom extends Room {
 
     let gameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
     const category = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
+    const betting = this.roundWillBeBetting();
 
     // Enforce Category Restrictions
     if (category === "Rock Paper Scissors" || category === "Simon Says" || category === "Perfection") {
@@ -823,6 +881,9 @@ export class LobbyRoom extends Room {
     } else if (category === "Hot Potato" && gameType === "2v2") {
       gameType = "1v1"; // Fallback from 2v2 for Hot Potato
     }
+
+    // A betting round always plays Battle Royale, whoever the wheel drew.
+    if (betting) gameType = "BR";
 
     for (let i = contestantIds.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -869,6 +930,7 @@ export class LobbyRoom extends Room {
 
     this.state.selectedPlayers.clear();
     contestantIds.slice(0, requiredPlayers).forEach(id => this.state.selectedPlayers.push(id));
+    this.lockBettingStakes();
 
     this.broadcast("SpinWheelEvent", {
       type: this.state.currentGameType,
@@ -880,7 +942,12 @@ export class LobbyRoom extends Room {
 
   forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]): boolean {
     if (this.matchOver) return false;
-    const contestantIds = connectedPlayerIds(this.state.players, selectedPlayerIds);
+    const betting = this.roundWillBeBetting();
+    // A betting round ignores a requested 1v1 or 2v2 subset and plays everyone.
+    const contestantIds = connectedPlayerIds(
+      this.state.players,
+      betting ? undefined : selectedPlayerIds,
+    );
     if (!hasEnoughConnectedPlayers(this.state.players, contestantIds)) {
       return false;
     }
@@ -891,7 +958,7 @@ export class LobbyRoom extends Room {
     this.clearReadyFlags();
     this.beginRound();
     this.state.phase = "wheel";
-    this.state.currentGameType = type;
+    this.state.currentGameType = betting ? "BR" : type;
     this.state.currentCategory = category;
 
     // Refund any active Turbo cards if category is excluded
@@ -912,6 +979,7 @@ export class LobbyRoom extends Room {
 
     this.state.selectedPlayers.clear();
     contestantIds.forEach(id => this.state.selectedPlayers.push(id));
+    this.lockBettingStakes();
 
     this.broadcast("SpinWheelEvent", {
       type: this.state.currentGameType,
@@ -1025,11 +1093,18 @@ export class LobbyRoom extends Room {
 
   /**
    * Games only report who won, who drinks, and who tied.
-   * Standard +3 / +1 drink is applied here, once, before resolution.
+   * A normal round applies +3 / +1 drink here, once, before resolution.
+   * A betting round pays the pot instead of +3. Drinks still apply.
    */
   applyActiveGameResult() {
     if (!this.activeGame) return;
     const result = this.activeGame.onEnd(this.state);
+    if (isBettingRound(this.state.roundCount)) {
+      this.state.isBettingRound = true;
+      if (!this.bettingLocked) this.lockBettingStakes();
+      this.settleBetting(result);
+      return;
+    }
     applyStandardScoring(this.state, result);
   }
 
@@ -1038,8 +1113,12 @@ export class LobbyRoom extends Room {
     this.shieldChainCount = 0;
     this.state.phase = "resolution";
 
-    // Process DOUBLE POINTS effect for winners
-    applyDoublePoints(this.state);
+    // Double Points adds another +3 on top of the standard +3.
+    // A settled betting round already replaced that +3 with the pot, so it
+    // does not add a further +3. An unsettled resolution still doubles.
+    if (!this.bettingSettled) {
+      applyDoublePoints(this.state);
+    }
 
     // Check if roundCount is a multiple of 3 to distribute cards
     if (this.state.roundCount > 0 && this.state.roundCount % 3 === 0) {
@@ -1049,6 +1128,163 @@ export class LobbyRoom extends Room {
     // Reset activeEffects for all players at end of round
     this.state.players.forEach(p => {
       p.activeEffects = "";
+    });
+  }
+
+  /**
+   * Take min(3, points) from each connected contestant. Called once when the
+   * betting round's wheel first starts. A respin or wild-card replacement
+   * does not take the stake again. Points leave `score` immediately so the
+   * pot and the scores stay consistent during the round.
+   */
+  private lockBettingStakes(): void {
+    if (!isBettingRound(this.state.roundCount) || this.bettingLocked) return;
+    this.state.isBettingRound = true;
+
+    const ids: string[] = [];
+    const wagers: BettingWagerView[] = [];
+    let pot = 0;
+    this.state.selectedPlayers.forEach((id) => {
+      const player = this.state.players.get(id);
+      if (!player || !player.isConnected) return;
+      const wager = wagerForPoints(player.score);
+      player.score -= wager;
+      player.betWager = wager;
+      player.betPayout = 0;
+      player.betNet = -wager;
+      player.betRank = 0;
+      pot += wager;
+      ids.push(id);
+      wagers.push({ playerId: id, name: player.name, wager });
+    });
+
+    this.bettingLocked = true;
+    this.bettingSettled = false;
+    this.bettingPlayerIds = ids;
+    this.state.bettingPot = pot;
+    this.state.bettingRefunded = false;
+
+    const payload: BettingRoundPayload = {
+      roundCount: this.state.roundCount,
+      pot,
+      mode: "BR",
+      wagers,
+    };
+    this.broadcast(BETTING_ROUND_EVENT, payload);
+  }
+
+  /**
+   * Pay the pot from the mini-game's placement, or return every wager when
+   * nobody won. Drinks always apply. There is no +3.
+   */
+  private settleBetting(result: { winners: string[]; losers: string[]; tiedIds: string[] }): void {
+    if (this.bettingSettled) return;
+    this.bettingSettled = true;
+    applyDrinks(this.state, result);
+
+    const stillHere = this.bettingPlayerIds.filter((id) => this.state.players.has(id));
+    if (isNoActionResult(result)) {
+      const payouts: BettingPayoutView[] = [];
+      for (const id of stillHere) {
+        const player = this.state.players.get(id);
+        if (!player) continue;
+        player.score += player.betWager;
+        player.betPayout = player.betWager;
+        player.betNet = 0;
+        player.betRank = 0;
+        payouts.push({
+          playerId: id,
+          name: player.name,
+          wager: player.betWager,
+          payout: player.betWager,
+          net: 0,
+          rank: 0,
+        });
+      }
+      this.state.bettingRefunded = true;
+      this.broadcastBettingPayout("no-action", true, payouts);
+      return;
+    }
+
+    const placements = standingsForPlayers(stillHere, result, this.state.lastGameResult);
+    const shares = splitPot(placements, this.state.bettingPot);
+    const payouts: BettingPayoutView[] = [];
+    for (const share of shares) {
+      const player = this.state.players.get(share.playerId);
+      if (!player) continue;
+      player.score += share.payout;
+      player.betPayout = share.payout;
+      player.betNet = share.payout - player.betWager;
+      player.betRank = share.rank;
+      payouts.push({
+        playerId: share.playerId,
+        name: player.name,
+        wager: player.betWager,
+        payout: share.payout,
+        net: player.betNet,
+        rank: share.rank,
+      });
+    }
+    this.state.bettingRefunded = false;
+    this.broadcastBettingPayout("payout", false, payouts);
+  }
+
+  /**
+   * Give every unspent stake back. Used when the round is aborted or when
+   * resolution is left without a game result, so a replay does not charge twice
+   * and a skipped result cannot eat the pot.
+   */
+  private refundUnsettledBetting(reason: Extract<BettingPayoutReason, "aborted" | "unresolved">): void {
+    if (!this.bettingLocked || this.bettingSettled) return;
+    const payouts: BettingPayoutView[] = [];
+    for (const id of this.bettingPlayerIds) {
+      const player = this.state.players.get(id);
+      if (!player) continue;
+      player.score += player.betWager;
+      payouts.push({
+        playerId: id,
+        name: player.name,
+        wager: player.betWager,
+        payout: player.betWager,
+        net: 0,
+        rank: 0,
+      });
+      player.betWager = 0;
+      player.betPayout = 0;
+      player.betNet = 0;
+      player.betRank = 0;
+    }
+    this.state.bettingRefunded = false;
+    this.broadcastBettingPayout(reason, true, payouts);
+    this.state.bettingPot = 0;
+    this.bettingLocked = false;
+    this.bettingPlayerIds = [];
+  }
+
+  private broadcastBettingPayout(
+    reason: BettingPayoutReason,
+    refunded: boolean,
+    payouts: BettingPayoutView[],
+  ): void {
+    const payload: BettingPayoutPayload = {
+      roundCount: this.state.roundCount,
+      pot: this.state.bettingPot,
+      refunded,
+      reason,
+      payouts,
+    };
+    this.broadcast(BETTING_PAYOUT_EVENT, payload);
+  }
+
+  /** Clear the pot display. Does not move points. */
+  private resetBettingDisplay(): void {
+    this.state.bettingPot = 0;
+    this.state.bettingRefunded = false;
+    this.state.players.forEach((player) => {
+      player.betWager = 0;
+      player.betPayout = 0;
+      player.betNet = 0;
+      player.betRank = 0;
     });
   }
 }

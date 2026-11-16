@@ -2,10 +2,10 @@
  * Match length and the end-of-match podium.
  *
  * The round index the chart is showing is the only start-of-round hook.
- * A later betting ticket (every 5th round, including a final round when the
- * length is a multiple of 5) can branch on `upcomingRoundNumber` before the
- * wheel starts. A no-action betting round refunds wagers there. This module
- * does not run betting.
+ * Betting (every 5th round, including a final round when the length is a
+ * multiple of 5) reads `roundCount` from here. Wagers, the forced Battle
+ * Royale mode, and the pot payout live in `betting.ts`. This module does
+ * not move points.
  */
 
 export const ROUND_CHOICES = [10, 15, 20, 30, 40, 50] as const;

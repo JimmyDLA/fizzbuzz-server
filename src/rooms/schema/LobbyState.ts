@@ -13,6 +13,23 @@ export class Player extends Schema {
   @type("boolean") isConnected: boolean = true;
   @type(["string"]) cards = new ArraySchema<string>();
   @type("string") activeEffects: string = ""; // JSON string e.g. {"turbo":true,"doublePoints":true}
+  /**
+   * Points taken into the pot when a betting round starts. 0 on any other round.
+   * Capped at min(3, the points the player had). Already removed from `score`.
+   */
+  @type("number") betWager: number = 0;
+  /** Points paid back from the pot when the betting round resolves. 0 until then. */
+  @type("number") betPayout: number = 0;
+  /**
+   * betPayout − betWager once the round resolves. While the round is still
+   * being played this is −betWager, matching the points already removed from score.
+   */
+  @type("number") betNet: number = 0;
+  /**
+   * 1-based competition rank for this betting round. Ties share the best rank.
+   * 0 until the pot is paid, and 0 when the pot was refunded.
+   */
+  @type("number") betRank: number = 0;
 }
 
 /** One seat on the end-of-match podium. `place` is 1, 2, or 3. Ties share a place. */
@@ -49,4 +66,18 @@ export class LobbyState extends Schema {
   @type("number") readyCount: number = 0;
   /** Connected players. Disconnected seats are excluded from the ready count. */
   @type("number") connectedCount: number = 0;
+  /**
+   * True while the displayed round is a betting round (roundCount is a positive
+   * multiple of 5), including the chart before the spin and a final round.
+   * The app shows the "Betting round" banner from this flag.
+   */
+  @type("boolean") isBettingRound: boolean = false;
+  /** Sum of betWager for the players who staked this round. 0 outside a locked betting round. */
+  @type("number") bettingPot: number = 0;
+  /**
+   * True after a no-action betting round returns every wager.
+   * Cleared when the next chart is shown, and kept on gameover so the podium
+   * can still see that the last pot was returned.
+   */
+  @type("boolean") bettingRefunded: boolean = false;
 }
