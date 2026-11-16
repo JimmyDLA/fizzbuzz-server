@@ -31,9 +31,9 @@ const RANK_TABLE: Record<number, number[]> = {
   3: [5, 3, 1],
   4: [5, 4, 2, 1],
   5: [5, 4, 3, 2, 1],
-  6: [5, 4, 3, 3, 2, 1],
-  8: [5, 5, 4, 3, 3, 2, 1, 1],
-  12: [6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0],
+  6: [6, 5, 4, 2, 1, 0],
+  8: [6, 5, 5, 3, 2, 2, 1, 0],
+  12: [6, 6, 5, 5, 4, 4, 2, 2, 1, 1, 0, 0],
 };
 
 interface Broadcast {
@@ -310,26 +310,79 @@ describe("pot split", () => {
     }
   });
 
-  it("gives an equal remainder to the better rank, then to earlier input order", () => {
-    // 1st and 3rd both have remainder 0.5 and one point is left. 1st gets it: 5, 3, 1.
-    const distinct = splitPot(distinctPlacements(3), 9);
-    assert.deepEqual(distinct.map((share) => share.payout), [5, 3, 1]);
+  it("pays a two-way tie for 1st the same amount in both split modes", () => {
+    const tiedFirst = [
+      { playerId: "a", standing: 2 },
+      { playerId: "b", standing: 2 },
+      { playerId: "c", standing: 0 },
+    ];
+    const equalStakes = { a: 1, b: 1, c: 1 };
+    for (const stakes of [undefined, equalStakes]) {
+      const small = splitPot(tiedFirst, 3, stakes);
+      const large = splitPot(tiedFirst, 6, stakes);
+      assert.deepEqual(small.map((share) => share.payout), [1, 1, 1]);
+      assert.deepEqual(large.map((share) => share.payout), [3, 3, 0]);
+      assert.deepEqual(small.map((share) => share.rank), [1, 1, 3]);
+      assert.equal(small.reduce((sum, share) => sum + share.payout, 0), 3);
+      assert.equal(large.reduce((sum, share) => sum + share.payout, 0), 6);
+    }
 
-    // Three players tied, pot 10. Floors are 3 and one leftover point follows input order.
-    const tied = splitPot(
-      [
-        { playerId: "a", standing: 1 },
-        { playerId: "b", standing: 1 },
-        { playerId: "c", standing: 1 },
-      ],
-      10,
-    );
-    assert.deepEqual(tied.map((share) => share.payout), [4, 3, 3]);
-    assert.deepEqual(tied.map((share) => share.rank), [1, 1, 1]);
-    assert.equal(tied.reduce((sum, share) => sum + share.payout, 0), 10);
+    // Unequal stakes stay proportional. a and b are tied, but a staked more.
+    const uneven = splitPot(tiedFirst, 6, { a: 3, b: 1, c: 1 });
+    assert.deepEqual(uneven.map((share) => share.payout), [4, 1, 1]);
+    assert.equal(uneven.reduce((sum, share) => sum + share.payout, 0), 6);
   });
 
-  it("averages the weights of a tie and still conserves the pot", () => {
+  it("keeps a three-way tie equal, then uses earliest selection for a leftover the group cannot share", () => {
+    const three = [
+      { playerId: "a", standing: 1 },
+      { playerId: "b", standing: 1 },
+      { playerId: "c", standing: 1 },
+    ];
+    assert.deepEqual(splitPot(three, 3).map((share) => share.payout), [1, 1, 1]);
+    const fallback = splitPot(three, 4);
+    assert.deepEqual(fallback.map((share) => share.payout), [2, 1, 1]);
+    assert.deepEqual(fallback.map((share) => share.rank), [1, 1, 1]);
+    assert.deepEqual(splitPot(three, 4, { a: 2, b: 2, c: 2 }).map((share) => share.payout), [2, 1, 1]);
+    assert.deepEqual(splitPot(three, 10).map((share) => share.payout), [4, 3, 3]);
+    assert.equal(splitPot(three, 4).reduce((sum, share) => sum + share.payout, 0), 4);
+
+    // A 0 stake is not eligible, so the leftover falls through to the earlier staker.
+    const skipped = splitPot(three, 5, { a: 1, b: 0, c: 1 });
+    assert.deepEqual(skipped.map((share) => share.payout), [3, 0, 2]);
+    assert.equal(skipped.reduce((sum, share) => sum + share.payout, 0), 5);
+  });
+
+  it("keeps a middle tie equal unless no rank group can take the leftover", () => {
+    const middle = [
+      { playerId: "a", standing: 10 },
+      { playerId: "b", standing: 5 },
+      { playerId: "c", standing: 5 },
+      { playerId: "d", standing: 1 },
+    ];
+    const shares = splitPot(middle, 8);
+    assert.deepEqual(shares.map((share) => share.payout), [3, 2, 2, 1]);
+    assert.deepEqual(shares.map((share) => share.rank), [1, 2, 2, 4]);
+    assert.equal(shares.reduce((sum, share) => sum + share.payout, 0), 8);
+    const weighted = splitPot(middle, 8, { a: 1, b: 1, c: 1, d: 1 });
+    assert.deepEqual(weighted.map((share) => share.payout), [3, 2, 2, 1]);
+
+    // Two pairs. Leftover 1 fits neither pair, so the earliest selected player takes it.
+    const pairs = splitPot(
+      [
+        { playerId: "a", standing: 4 },
+        { playerId: "b", standing: 4 },
+        { playerId: "c", standing: 1 },
+        { playerId: "d", standing: 1 },
+      ],
+      5,
+    );
+    assert.deepEqual(pairs.map((share) => share.payout), [3, 2, 0, 0]);
+    assert.deepEqual(pairs.map((share) => share.rank), [1, 1, 3, 3]);
+    assert.equal(pairs.reduce((sum, share) => sum + share.payout, 0), 5);
+  });
+
+  it("uses the best rank's weight for a tie and still conserves the pot", () => {
     const shares = splitPot(
       [
         { playerId: "a", standing: 10 },
@@ -344,10 +397,10 @@ describe("pot split", () => {
     assert.deepEqual(shares.map((share) => ({ id: share.playerId, payout: share.payout, rank: share.rank })), [
       { id: "a", payout: 5, rank: 1 },
       { id: "b", payout: 5, rank: 1 },
-      { id: "c", payout: 3, rank: 3 },
-      { id: "d", payout: 2, rank: 4 },
-      { id: "e", payout: 2, rank: 5 },
-      { id: "f", payout: 1, rank: 6 },
+      { id: "c", payout: 4, rank: 3 },
+      { id: "d", payout: 3, rank: 4 },
+      { id: "e", payout: 1, rank: 5 },
+      { id: "f", payout: 0, rank: 6 },
     ]);
 
     const everyone = splitPot(
@@ -422,7 +475,7 @@ describe("betting round resolution", () => {
     room.activeGame = new TappingRace();
     room.applyActiveGameResult();
 
-    const expected: Record<number, number> = { 60: 5, 50: 4, 40: 3, 30: 3, 20: 2, 10: 1 };
+    const expected: Record<number, number> = { 60: 6, 50: 5, 40: 4, 30: 2, 20: 1, 10: 0 };
     let payoutSum = 0;
     for (const id of ids) {
       const player = room.state.players.get(id)!;
@@ -434,14 +487,14 @@ describe("betting round resolution", () => {
       assert.equal(player.drinks, player.gameScore === 60 ? 0 : 1, id);
     }
     assert.equal(payoutSum, 18);
-    assert.equal(room.state.players.get("a")?.score, 11);
+    assert.equal(room.state.players.get("a")?.score, 12);
     const [paid] = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
     assert.equal(paid.reason, "payout");
     assert.equal(paid.pot, 18);
     assert.equal(paid.refunded, false);
 
     room.startResolutionPhase();
-    assert.equal(room.state.players.get("a")?.score, 11, "resolution does not add the normal +3");
+    assert.equal(room.state.players.get("a")?.score, 12, "resolution does not add the normal +3");
     leaveResolution(room, room.clients as unknown as FakeClient[]);
     assert.equal(room.state.phase, "gameover");
     assert.equal(room.state.roundCount, 10);
@@ -450,8 +503,8 @@ describe("betting round resolution", () => {
       playerId: entry.playerId,
       score: entry.score,
     }));
-    assert.equal(podium[0].score, 11);
-    assert.ok(podium.every((entry) => entry.score !== 12));
+    assert.equal(podium[0].score, 12);
+    assert.ok(podium.every((entry) => entry.score !== 15));
   });
 
   it("shares a tied placement and does not add +3 for the player holding Double Points", () => {
@@ -481,10 +534,10 @@ describe("betting round resolution", () => {
       return found.map((player) => player.betPayout).sort((a, b) => b - a);
     };
     assert.deepEqual(byScore(10), [5, 5]);
-    assert.deepEqual(byScore(8), [3]);
-    assert.deepEqual(byScore(6), [2]);
-    assert.deepEqual(byScore(4), [2]);
-    assert.deepEqual(byScore(2), [1]);
+    assert.deepEqual(byScore(8), [4]);
+    assert.deepEqual(byScore(6), [3]);
+    assert.deepEqual(byScore(4), [1]);
+    assert.deepEqual(byScore(2), [0]);
     for (const id of ["ada", "bea"]) {
       const player = room.state.players.get(id)!;
       assert.equal(player.score, 10 - 3 + 5, `${id} does not get +3 or +6 on top of the pot`);
