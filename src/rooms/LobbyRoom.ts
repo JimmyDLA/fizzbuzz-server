@@ -332,8 +332,8 @@ export class LobbyRoom extends Room {
       console.log(`[Rejoin] ${player.name} rejoined from offline cache.`);
     }
 
-    // A rejoin must not restore a hand over the cap. Drop the newest award, not an older card.
-    this.discardNewestOverCap(player);
+    // A rejoin must not restore a hand over the cap. Drop the card held longest, same as the 15s timeout.
+    this.discardOldestOverCap(player);
 
     // Resolve host status: if no host exists in the lobby, make this player host
     let hostExists = false;
@@ -392,8 +392,8 @@ export class LobbyRoom extends Room {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
-    // Disconnect ends the choice. The temporary award does not survive the leave.
-    this.discardNewestOverCap(player);
+    // Disconnect ends the choice the same way a timeout does: drop the card held longest.
+    this.discardOldestOverCap(player);
     const cardsArray = player.cards.toArray ? player.cards.toArray() : Array.from(player.cards);
     const cardAcquiredAt = [...(this.cardAcquiredAt.get(player.id) ?? [])];
     player.isConnected = false;
@@ -530,17 +530,6 @@ export class LobbyRoom extends Room {
     return oldest;
   }
 
-  private newestHeldIndex(player: Player): number {
-    const last = player.cards.length - 1;
-    const order = this.cardAcquiredAt.get(player.id);
-    if (!order || order.length !== player.cards.length || last < 0) return last;
-    let newest = 0;
-    for (let i = 1; i < order.length; i++) {
-      if (order[i] >= order[newest]) newest = i;
-    }
-    return newest;
-  }
-
   private handBlocksActions(player: Player): boolean {
     return player.pendingDiscard || player.cards.length > HAND_CAP;
   }
@@ -575,22 +564,12 @@ export class LobbyRoom extends Room {
     this.clearPendingDiscardTimer(player.id);
   }
 
-  /** No pick within the window: drop the card held the longest. The new award stays. */
+  /** No pick (15s timeout, disconnect, or rejoin over the cap): drop the card held the longest. */
   private discardOldestOverCap(player: Player): void {
     while (player.cards.length > HAND_CAP) {
       this.removeCardAt(player, this.oldestHeldIndex(player));
     }
     this.clearPendingDiscard(player);
-  }
-
-  /** Disconnect or a cache rejoin: drop the newest award until the hand is back at the cap. */
-  private discardNewestOverCap(player: Player): void {
-    while (player.cards.length > HAND_CAP) {
-      this.removeCardAt(player, this.newestHeldIndex(player));
-    }
-    if (player.pendingDiscard || player.pendingDiscardDeadline !== 0) {
-      this.clearPendingDiscard(player);
-    }
   }
 
   distributeSpecialtyCards() {

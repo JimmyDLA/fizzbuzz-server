@@ -9,8 +9,8 @@ import { client } from "./helpers";
 
 /**
  * CRD-005, CRD-012, CRD-016. The server allows one temporary third card.
- * The player picks which card to drop. After 15s the oldest card (held longest)
- * is dropped. Disconnect and a cache rejoin drop the newest award instead.
+ * The player picks which card to drop. With no pick — 15s timeout, disconnect,
+ * or rejoin — the oldest card (held longest) is dropped. The new award stays.
  * A further award while that choice is open is skipped.
  */
 
@@ -305,7 +305,7 @@ describe("15s auto-discard", () => {
 });
 
 describe("CRD-012 / CRD-016 reconnect", () => {
-  it("drops the newest card on disconnect and restores a 2-card hand", async () => {
+  it("CRD-016 drops the oldest card on disconnect and keeps the new award", async () => {
     const { room, player } = overflow(["OLDEST", "MIDDLE", "NEWEST"]);
     player.score = 9;
     player.drinks = 2;
@@ -316,7 +316,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     room.onJoin(client("ada-2"), { name: "Ada" });
     const restored = room.state.players.get("ada-2");
     assert.ok(restored);
-    assert.deepEqual(hand(restored), ["OLDEST", "MIDDLE"]);
+    assert.deepEqual(hand(restored), ["MIDDLE", "NEWEST"]);
     assert.equal(restored.pendingDiscard, false);
     assert.equal(restored.pendingDiscardDeadline, 0);
     assert.equal(restored.score, 9);
@@ -334,7 +334,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     assert.deepEqual(hand(room.state.players.get("ada-2")!), ["OLDEST", "MIDDLE"]);
   });
 
-  it("drops the newest cached card even when it is not the last index", () => {
+  it("drops the oldest cached card even when it is not at index 0", () => {
     const room = setup();
     (room as unknown as {
       disconnectedPlayersCache: Map<string, { score: number; drinks: number; cards: string[]; cardAcquiredAt: number[]; activeEffects: string }>;
@@ -349,13 +349,13 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     room.onJoin(client("ada-2"), { name: "Ada" });
     const restored = room.state.players.get("ada-2");
     assert.ok(restored);
-    assert.deepEqual(hand(restored), ["MID", "OLD"]);
+    assert.deepEqual(hand(restored), ["NEW", "MID"]);
     assert.equal(restored.pendingDiscard, false);
     assert.equal(restored.score, 4);
     assert.equal(restored.activeEffects, "{\"keep\":true}");
   });
 
-  it("drops the newest card when rejoining a disconnected session that still holds 3", () => {
+  it("drops the oldest card when rejoining a disconnected session that still holds 3", () => {
     const room = setup();
     const stale = new Player();
     stale.id = "old";
@@ -373,7 +373,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     assert.equal(room.state.players.has("old"), false);
     const restored = room.state.players.get("ada-2");
     assert.ok(restored);
-    assert.deepEqual(hand(restored), ["MID", "OLD"]);
+    assert.deepEqual(hand(restored), ["NEW", "MID"]);
     assert.equal(restored.pendingDiscard, false);
     assert.equal(restored.score, 3);
   });
