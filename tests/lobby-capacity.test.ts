@@ -78,16 +78,16 @@ function lobbyError(client: FakeClient) {
 
 function withDevWheel(fn: () => void): void {
   const previousNodeEnv = process.env.NODE_ENV;
-  const previousFlag = process.env.ALLOW_DEV_WHEEL;
+  const previousFlag = process.env.ALLOW_DEV_TOOLS;
   process.env.NODE_ENV = "test";
-  process.env.ALLOW_DEV_WHEEL = "1";
+  process.env.ALLOW_DEV_TOOLS = "1";
   try {
     fn();
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
-    if (previousFlag === undefined) delete process.env.ALLOW_DEV_WHEEL;
-    else process.env.ALLOW_DEV_WHEEL = previousFlag;
+    if (previousFlag === undefined) delete process.env.ALLOW_DEV_TOOLS;
+    else process.env.ALLOW_DEV_TOOLS = previousFlag;
   }
 }
 

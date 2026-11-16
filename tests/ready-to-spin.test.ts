@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { Client } from "@colyseus/core";
-import { DEV_WHEEL_ENV, LobbyRoom, isDevWheelEnabled } from "../src/rooms/LobbyRoom";
+import { Client, CloseCode } from "@colyseus/core";
+import { DEV_TOOLS_ENV, LobbyRoom, isDevToolsEnabled } from "../src/rooms/LobbyRoom";
 import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "../src/rooms/lobbyErrors";
 import { Player } from "../src/rooms/schema/LobbyState";
 
@@ -92,6 +92,32 @@ function stopLoops(room: LobbyRoom): void {
     clearInterval(room.gameLoopInterval);
     room.gameLoopInterval = null;
   }
+}
+
+/** Abnormal close. Colyseus passes a numeric code; only 4000 is a consented leave. */
+function beginGrace(room: LobbyRoom, client: FakeClient): Promise<unknown> {
+  (client as FakeClient & { reconnectionToken?: string }).reconnectionToken = `${client.sessionId}-grace`;
+  return room.onLeave(client as unknown as Client, 1000);
+}
+
+async function finishGrace(room: LobbyRoom, client: FakeClient, pending: Promise<unknown>, reconnect: boolean): Promise<void> {
+  const token = (client as FakeClient & { reconnectionToken?: string }).reconnectionToken ?? "";
+  const internal = room as unknown as {
+    _reconnections: Record<string, [string, { resolve: (value: unknown) => void; reject: (value: unknown) => void }]>;
+    _reservedSeatTimeouts?: Record<string, ReturnType<typeof setTimeout>>;
+    _autoDisposeTimeout?: ReturnType<typeof setTimeout>;
+  };
+  const timer = internal._reservedSeatTimeouts?.[client.sessionId];
+  if (timer) clearTimeout(timer);
+  const entry = internal._reconnections[token];
+  assert.ok(entry, "grace reservation was not armed");
+  if (reconnect) {
+    entry[1].resolve({ sessionId: client.sessionId, reconnectionToken: token });
+  } else {
+    entry[1].reject(false);
+  }
+  await pending;
+  if (internal._autoDisposeTimeout) clearTimeout(internal._autoDisposeTimeout);
 }
 
 function useManualTimers() {
@@ -233,7 +259,7 @@ describe("ready to spin", { concurrency: 1 }, () => {
     assert.equal(leaving.room.state.readyCount, 2);
     assert.equal(leaving.room.state.connectedCount, 3);
 
-    await leaving.room.onLeave(leaving.clients[2] as unknown as Client, true);
+    await leaving.room.onLeave(leaving.clients[2] as unknown as Client, CloseCode.CONSENTED);
 
     assert.equal(leaving.room.state.phase, "wheel");
     assert.equal(leaving.room.state.players.has("cal"), false);
@@ -243,10 +269,67 @@ describe("ready to spin", { concurrency: 1 }, () => {
 
     const floor = chartRoom(["ada", "bea"]);
     ready(floor.room, floor.clients[0]);
-    await floor.room.onLeave(floor.clients[1] as unknown as Client, true);
+    await floor.room.onLeave(floor.clients[1] as unknown as Client, CloseCode.CONSENTED);
     assert.equal(floor.room.state.phase, "chart");
     assert.equal(floor.room.state.connectedCount, 1);
     assert.equal(spinEvents(floor.broadcasts).length, 0);
+  });
+
+  it("a grace seat is disconnected, so it does not count or block the spin", async () => {
+    const { room, broadcasts, clients } = chartRoom(["ada", "bea", "cal"]);
+    const cal = room.state.players.get("cal");
+    assert.ok(cal);
+    cal.isReady = true;
+    room.checkAllReady();
+    assert.equal(room.state.readyCount, 1);
+    assert.equal(room.state.connectedCount, 3);
+    assert.equal(room.state.phase, "chart");
+
+    const pending = beginGrace(room, clients[2]);
+    try {
+      assert.equal(cal.isConnected, false);
+      assert.equal(cal.isReady, true);
+      assert.equal(room.state.readyCount, 0);
+      assert.equal(room.state.connectedCount, 2);
+      assert.equal(room.state.phase, "chart");
+
+      ready(room, clients[0]);
+      ready(room, clients[1]);
+      assert.equal(room.state.phase, "wheel");
+      assert.equal(room.state.connectedCount, 2);
+      assert.equal(room.state.readyCount, 0);
+      assert.ok(!room.state.selectedPlayers.toArray().includes("cal"));
+      assert.equal(spinEvents(broadcasts).length, 1);
+    } finally {
+      await finishGrace(room, clients[2], pending, true);
+    }
+  });
+
+  it("a same-session reconnect within grace keeps isReady", async () => {
+    const { room, clients } = chartRoom(["ada", "bea"]);
+    ready(room, clients[0]);
+    const ada = room.state.players.get("ada");
+    assert.ok(ada);
+    assert.equal(ada.isReady, true);
+    assert.equal(room.state.phase, "chart");
+
+    const pending = beginGrace(room, clients[0]);
+    try {
+      assert.equal(ada.isConnected, false);
+      assert.equal(ada.isReady, true);
+      assert.equal(room.state.readyCount, 0);
+      assert.equal(room.state.connectedCount, 1);
+      assert.equal(room.state.phase, "chart");
+    } finally {
+      await finishGrace(room, clients[0], pending, true);
+    }
+
+    assert.equal(ada.isConnected, true);
+    assert.equal(ada.isReady, true);
+    assert.equal(room.state.readyCount, 1);
+    assert.equal(room.state.connectedCount, 2);
+    assert.equal(room.state.phase, "chart");
+    assert.equal(room.state.players.has("ada"), true);
   });
 
   it("un-readying before everyone is ready prevents the spin", () => {
@@ -361,16 +444,16 @@ describe("ready to spin", { concurrency: 1 }, () => {
   });
 
   it("ignores dev_start_wheel when the dev flag is off", () => {
-    assert.equal(isDevWheelEnabled({}), false);
-    assert.equal(isDevWheelEnabled({ NODE_ENV: "production", [DEV_WHEEL_ENV]: "1" }), false);
-    assert.equal(isDevWheelEnabled({ NODE_ENV: "development" }), false);
-    assert.equal(isDevWheelEnabled({ [DEV_WHEEL_ENV]: "1" }), false);
-    assert.equal(isDevWheelEnabled({ NODE_ENV: "test", [DEV_WHEEL_ENV]: "1" }), true);
+    assert.equal(isDevToolsEnabled({}), false);
+    assert.equal(isDevToolsEnabled({ NODE_ENV: "production", [DEV_TOOLS_ENV]: "1" }), false);
+    assert.equal(isDevToolsEnabled({ NODE_ENV: "development" }), false);
+    assert.equal(isDevToolsEnabled({ [DEV_TOOLS_ENV]: "1" }), false);
+    assert.equal(isDevToolsEnabled({ NODE_ENV: "test", [DEV_TOOLS_ENV]: "1" }), true);
 
     const previousNodeEnv = process.env.NODE_ENV;
-    const previousFlag = process.env[DEV_WHEEL_ENV];
+    const previousFlag = process.env[DEV_TOOLS_ENV];
     delete process.env.NODE_ENV;
-    delete process.env[DEV_WHEEL_ENV];
+    delete process.env[DEV_TOOLS_ENV];
     try {
       const { room, broadcasts, clients } = chartRoom(["ada", "bea"]);
       emit(room, "dev_start_wheel", clients[0], {
@@ -385,7 +468,7 @@ describe("ready to spin", { concurrency: 1 }, () => {
       assert.equal(clients[0].sent.find((entry) => entry.type === LOBBY_ERROR_EVENT), undefined);
 
       process.env.NODE_ENV = "production";
-      process.env[DEV_WHEEL_ENV] = "1";
+      process.env[DEV_TOOLS_ENV] = "1";
       emit(room, "dev_start_wheel", clients[0], {
         type: "1v1",
         category: "Trivia",
@@ -397,16 +480,45 @@ describe("ready to spin", { concurrency: 1 }, () => {
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = previousNodeEnv;
-      if (previousFlag === undefined) delete process.env[DEV_WHEEL_ENV];
-      else process.env[DEV_WHEEL_ENV] = previousFlag;
+      if (previousFlag === undefined) delete process.env[DEV_TOOLS_ENV];
+      else process.env[DEV_TOOLS_ENV] = previousFlag;
+    }
+  });
+
+  it("ignores dev_award_card when the dev flag is off", () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousFlag = process.env[DEV_TOOLS_ENV];
+    delete process.env.NODE_ENV;
+    delete process.env[DEV_TOOLS_ENV];
+    try {
+      const { room, clients } = chartRoom(["ada"]);
+      emit(room, "dev_award_card", clients[0], { cardId: "WILD CARD", targetPlayerId: "ada" });
+      assert.equal(room.state.players.get("ada")?.cards.length, 0);
+      assert.equal(clients[0].sent.find((entry) => entry.type === "CardAwardedEvent"), undefined);
+
+      process.env.NODE_ENV = "production";
+      process.env[DEV_TOOLS_ENV] = "1";
+      emit(room, "dev_award_card", clients[0], { cardId: "WILD CARD" });
+      assert.equal(room.state.players.get("ada")?.cards.length, 0);
+      assert.equal(clients[0].sent.find((entry) => entry.type === "CardAwardedEvent"), undefined);
+
+      process.env.NODE_ENV = "test";
+      emit(room, "dev_award_card", clients[0], { cardId: "WILD CARD" });
+      assert.equal(room.state.players.get("ada")?.cards.length, 1);
+      assert.equal(clients[0].sent.filter((entry) => entry.type === "CardAwardedEvent").length, 1);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousFlag === undefined) delete process.env[DEV_TOOLS_ENV];
+      else process.env[DEV_TOOLS_ENV] = previousFlag;
     }
   });
 
   it("allows host dev_start_wheel only when the dev flag is on", () => {
     const previousNodeEnv = process.env.NODE_ENV;
-    const previousFlag = process.env[DEV_WHEEL_ENV];
+    const previousFlag = process.env[DEV_TOOLS_ENV];
     process.env.NODE_ENV = "test";
-    process.env[DEV_WHEEL_ENV] = "1";
+    process.env[DEV_TOOLS_ENV] = "1";
     try {
       const { room, broadcasts, clients } = chartRoom(["ada", "bea"]);
       emit(room, "dev_start_wheel", clients[1], {
@@ -433,8 +545,8 @@ describe("ready to spin", { concurrency: 1 }, () => {
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = previousNodeEnv;
-      if (previousFlag === undefined) delete process.env[DEV_WHEEL_ENV];
-      else process.env[DEV_WHEEL_ENV] = previousFlag;
+      if (previousFlag === undefined) delete process.env[DEV_TOOLS_ENV];
+      else process.env[DEV_TOOLS_ENV] = previousFlag;
     }
   });
 
@@ -572,7 +684,7 @@ describe("ready to spin", { concurrency: 1 }, () => {
       player.isReady = true;
     }
 
-    await room.onLeave(clients[1] as unknown as Client, true);
+    await room.onLeave(clients[1] as unknown as Client, CloseCode.CONSENTED);
 
     assert.equal(room.state.phase, "chart");
     assert.equal(room.state.players.get("ada")?.isReady, false);

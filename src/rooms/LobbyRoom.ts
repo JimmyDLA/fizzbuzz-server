@@ -18,19 +18,20 @@ import { MAX_ROOM_PLAYERS, connectedPlayerIds, hasEnoughConnectedPlayers } from 
 import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "./lobbyErrors";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
-
-/**
- * Host dev spin. Enabled only when ALLOW_DEV_WHEEL=1 and NODE_ENV is
- * "development" or "test". Off by default, including production.
- */
-export const DEV_WHEEL_ENV = "ALLOW_DEV_WHEEL";
-
-export function isDevWheelEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const devOrTest = env.NODE_ENV === "development" || env.NODE_ENV === "test";
-  return devOrTest && env[DEV_WHEEL_ENV] === "1";
-}
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
 const EXCLUDED_TURBO_GAMES = ["Hot Potato", "Rock Paper Scissors", "Simon Says"];
+
+/**
+ * Dev-only host tools (`dev_start_wheel`, `dev_award_card`).
+ * Enabled only when ALLOW_DEV_TOOLS=1 and NODE_ENV is "development" or "test".
+ * Off by default, including production.
+ */
+export const DEV_TOOLS_ENV = "ALLOW_DEV_TOOLS";
+
+export function isDevToolsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const devOrTest = env.NODE_ENV === "development" || env.NODE_ENV === "test";
+  return devOrTest && env[DEV_TOOLS_ENV] === "1";
+}
 
 /** How long an abnormal disconnect keeps its roster seat. */
 export const RECONNECT_GRACE_SECONDS = 120;
@@ -93,7 +94,7 @@ export class LobbyRoom extends Room {
     this.onMessage("start_wheel", () => {});
 
     this.onMessage("dev_start_wheel", (client, message) => {
-      if (!isDevWheelEnabled()) return;
+      if (!isDevToolsEnabled()) return;
       const player = this.state.players.get(client.sessionId);
       if (player && player.isHost && this.state.phase === "chart") {
         const selectedPlayers = Array.isArray(message?.selectedPlayers) ? message.selectedPlayers : [];
@@ -104,6 +105,7 @@ export class LobbyRoom extends Room {
     });
 
     this.onMessage("dev_award_card", (client, message) => {
+      if (!isDevToolsEnabled()) return;
       const hostPlayer = this.state.players.get(client.sessionId);
       if (!hostPlayer || !hostPlayer.isHost) return;
 
