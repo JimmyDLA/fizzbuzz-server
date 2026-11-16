@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { ErrorCode, Server, matchMaker } from "@colyseus/core";
+import { CloseCode, ErrorCode, Server, matchMaker } from "@colyseus/core";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import type { Client } from "@colyseus/core";
 import { LobbyRoom } from "../src/rooms/LobbyRoom";
@@ -170,6 +170,26 @@ function podiumFromState(room: LobbyRoom) {
     name: entry.name,
     score: entry.score,
   }));
+}
+
+/** Abnormal close. Only CloseCode.CONSENTED (4000) removes the seat immediately. */
+function beginGrace(room: LobbyRoom, client: FakeClient): Promise<unknown> {
+  (client as FakeClient & { reconnectionToken?: string }).reconnectionToken = `${client.sessionId}-grace`;
+  return room.onLeave(client as unknown as Client, 1006);
+}
+
+async function finishGrace(room: LobbyRoom, client: FakeClient, pending: Promise<unknown>): Promise<void> {
+  const token = (client as FakeClient & { reconnectionToken?: string }).reconnectionToken ?? "";
+  const internal = room as unknown as {
+    _reconnections: Record<string, [string, { reject: (value: unknown) => void }]>;
+    _reservedSeatTimeouts?: Record<string, ReturnType<typeof setTimeout>>;
+  };
+  const timer = internal._reservedSeatTimeouts?.[client.sessionId];
+  if (timer) clearTimeout(timer);
+  const entry = internal._reconnections[token];
+  assert.ok(entry, "grace reservation was not armed");
+  entry[1].reject(false);
+  await pending;
 }
 
 function useManualTimers() {
@@ -370,7 +390,7 @@ describe("round counter", { concurrency: 1 }, () => {
     if (!room.state.selectedPlayers.includes("bea")) {
       room.state.selectedPlayers.push("bea");
     }
-    await room.onLeave(clients[1] as unknown as Client, true);
+    await room.onLeave(clients[1] as unknown as Client, CloseCode.CONSENTED);
 
     assert.equal(room.state.phase, "chart");
     assert.equal(room.state.roundCount, 1);
@@ -392,7 +412,7 @@ describe("round counter", { concurrency: 1 }, () => {
     const hostIndex = room.state.selectedPlayers.indexOf("ada");
     if (hostIndex >= 0) room.state.selectedPlayers.splice(hostIndex, 1);
 
-    await room.onLeave(clients[0] as unknown as Client, true);
+    await room.onLeave(clients[0] as unknown as Client, CloseCode.CONSENTED);
 
     assert.equal(room.state.phase, "playing");
     assert.equal(room.state.roundCount, 1);
@@ -597,6 +617,41 @@ describe("podium", { concurrency: 1 }, () => {
     assert.equal(room.state.players.get("eve")?.score, 1);
     assert.ok(!podiumFromState(room).some((seat) => seat.playerId === "eve"));
     assert.ok(!podiumFromState(room).some((seat) => seat.place === 2));
+  });
+
+  it("ranks a reconnect-grace seat and leaves out a consented departure", async () => {
+    const { room, clients, closed } = seat(["ada", "bea", "cal"], {
+      scores: { ada: 4, bea: 8, cal: 1 },
+    });
+    enterChart(room, clients);
+    playRounds(room, clients, 9);
+    spin(room, clients);
+    room.state.phase = "resolution";
+    room.state.selectedPlayers.clear();
+    room.state.selectedPlayers.push("ada", "bea");
+
+    await room.onLeave(clients[2] as unknown as Client, CloseCode.CONSENTED);
+    assert.equal(room.state.players.has("cal"), false);
+    assert.equal(room.state.phase, "resolution");
+
+    const grace = beginGrace(room, clients[1]);
+    assert.equal(room.state.players.get("bea")?.isConnected, false);
+    assert.equal(room.state.players.has("bea"), true);
+    assert.equal(room.state.phase, "resolution");
+    assert.equal(room.state.roundCount, 10);
+
+    leaveResolution(room, clients);
+
+    assert.equal(room.state.phase, "gameover");
+    assert.equal(closed.count, 1);
+    assert.deepEqual(podiumFromState(room), [
+      { place: 1, playerId: "bea", name: "bea", score: 8 },
+      { place: 2, playerId: "ada", name: "ada", score: 4 },
+    ]);
+    assert.ok(room.state.players.has("bea"));
+    assert.ok(!podiumFromState(room).some((seat) => seat.playerId === "cal"));
+
+    await finishGrace(room, clients[1], grace);
   });
 
   it("applies double points and a shield before the podium, then closes", () => {

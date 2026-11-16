@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { ErrorCode, Server, matchMaker } from "@colyseus/core";
+import { ClientState, ErrorCode, Server, matchMaker } from "@colyseus/core";
 import { WebSocketTransport } from "@colyseus/ws-transport";
-import { LobbyRoom } from "../src/rooms/LobbyRoom";
+import { LobbyRoom, RECONNECT_GRACE_SECONDS } from "../src/rooms/LobbyRoom";
 import { PracticeRoom } from "../src/rooms/PracticeRoom";
 import {
   MAX_ROOM_PLAYERS,
@@ -76,6 +76,21 @@ function lobbyError(client: FakeClient) {
   return client.sent.find((entry) => entry.type === LOBBY_ERROR_EVENT)?.payload;
 }
 
+function withDevWheel(fn: () => void): void {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousFlag = process.env.ALLOW_DEV_TOOLS;
+  process.env.NODE_ENV = "test";
+  process.env.ALLOW_DEV_TOOLS = "1";
+  try {
+    fn();
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousFlag === undefined) delete process.env.ALLOW_DEV_TOOLS;
+    else process.env.ALLOW_DEV_TOOLS = previousFlag;
+  }
+}
+
 describe("connected player start gate", () => {
   it("counts only connected players and requires two of them", () => {
     const players = {
@@ -129,7 +144,9 @@ describe("lobby start minimum", () => {
     assert.equal(room.state.phase, "chart");
     assert.equal(host.sent.filter((entry) => entry.type === LOBBY_ERROR_EVENT).length, 1);
 
-    emit(room, "dev_start_wheel", host, { type: "BR", category: "Tapping Race", selectedPlayers: ["host"] });
+    withDevWheel(() => {
+      emit(room, "dev_start_wheel", host, { type: "BR", category: "Tapping Race", selectedPlayers: ["host"] });
+    });
 
     assert.equal(room.state.phase, "chart");
     assert.notEqual(room.state.currentGameType, "BR");
@@ -232,10 +249,12 @@ describe("lobby start minimum", () => {
     assert.equal(room.state.currentGameType, "");
     assert.equal(lobbyError(host), undefined);
 
-    emit(room, "dev_start_wheel", host, {
-      type: "BR",
-      category: "Tapping Race",
-      selectedPlayers: ["host", "guest"],
+    withDevWheel(() => {
+      emit(room, "dev_start_wheel", host, {
+        type: "BR",
+        category: "Tapping Race",
+        selectedPlayers: ["host", "guest"],
+      });
     });
     assert.equal(room.state.phase, "chart");
     assert.notEqual(room.state.currentGameType, "BR");
@@ -263,6 +282,15 @@ describe("LOB-005 room cap", () => {
   });
 
   after(async () => {
+    const listings = await matchMaker.query();
+    for (const listing of listings) {
+      const room = matchMaker.getLocalRoomById(listing.roomId) as LobbyRoom | undefined;
+      if (!room) continue;
+      const { pending, timers } = graceHandles(room);
+      for (const entry of Object.values(pending)) entry[1].reject(false);
+      for (const timer of Object.values(timers)) clearTimeout(timer);
+    }
+    await delay(50);
     await server.gracefullyShutdown(false);
   });
 
@@ -315,4 +343,203 @@ describe("LOB-005 room cap", () => {
     assert.notEqual(practiceFull.status, 200);
     assert.equal(parseLobbyError(String(practiceFull.json.error ?? "")), null);
   });
+
+  it("holds a grace seat against a 13th join, then frees it when grace expires", async () => {
+    assert.equal(RECONNECT_GRACE_SECONDS, 120);
+    const filled = await fillLobby(port, post);
+    try {
+      const dropped = filled.sockets[0];
+      const droppedId = filled.seats[0].sessionId as string;
+      dropped.close(1000);
+
+      await waitFor(() => filled.room.state.players.get(droppedId)?.isConnected === false
+        && filled.room.state.players.has(droppedId)
+        && filled.room.isAtSeatCapacity());
+
+      const rejected = await post(`/matchmake/joinById/${filled.roomId}`, { name: "Player 13" });
+      assert.equal(rejected.status, ErrorCode.MATCHMAKE_INVALID_ROOM_ID);
+      assert.equal(rejected.json.error, formatLobbyError(roomFullError()));
+      assert.equal(filled.room.state.players.size, MAX_ROOM_PLAYERS);
+      const graceTimer = (filled.room as unknown as {
+        _reservedSeatTimeouts?: Record<string, { _idleTimeout?: number }>;
+      })._reservedSeatTimeouts?.[droppedId];
+      assert.equal(graceTimer?._idleTimeout, RECONNECT_GRACE_SECONDS * 1000);
+      expireGrace(filled.room, droppedId);
+
+      const listing = await matchMaker.getRoomById(filled.roomId);
+      await waitFor(() => !filled.room.state.players.has(droppedId)
+        && !filled.room.isAtSeatCapacity()
+        && listing.locked !== true, 5000);
+      assert.equal(listing.locked, false);
+
+      const joined = await post(`/matchmake/joinById/${filled.roomId}`, { name: "Player 13" });
+      assert.equal(joined.status, 200, JSON.stringify(joined.json));
+      assert.equal(filled.room.isAtSeatCapacity(), true);
+    } finally {
+      await releaseLobby(filled);
+    }
+  });
+
+  it("lets the grace player reconnect into a room that rejects a 13th join", async () => {
+    const filled = await fillLobby(port, post);
+    try {
+      const droppedSeat = filled.seats[0];
+      const droppedId = String(droppedSeat.sessionId);
+      const droppedClient = filled.room.clients.find((client) => client.sessionId === droppedId);
+      const token = (droppedClient as { reconnectionToken?: string } | undefined)?.reconnectionToken;
+      assert.equal(typeof token, "string");
+      filled.sockets[0].close(1000);
+
+      await waitFor(() => filled.room.state.players.get(droppedId)?.isConnected === false
+        && filled.room.isAtSeatCapacity());
+
+      const rejected = await post(`/matchmake/joinById/${filled.roomId}`, { name: "Player 13" });
+      assert.equal(rejected.json.error, formatLobbyError(roomFullError()));
+
+      const reconnect = await post(`/matchmake/reconnect/${filled.roomId}`, { reconnectionToken: token });
+      assert.equal(reconnect.status, 200, JSON.stringify(reconnect.json));
+      assert.equal(reconnect.json.sessionId, droppedId);
+
+      const socket = await openSocket(port, {
+        processId: String(reconnect.json.processId ?? droppedSeat.processId),
+        roomId: filled.roomId,
+        sessionId: droppedId,
+        reconnectionToken: token,
+      }, filled.room);
+      filled.sockets.push(socket);
+
+      await waitFor(() => filled.room.state.players.get(droppedId)?.isConnected === true);
+      const stillFull = await post(`/matchmake/joinById/${filled.roomId}`, { name: "Player 13" });
+      assert.equal(stillFull.json.error, formatLobbyError(roomFullError()));
+      assert.equal(filled.room.state.players.has(droppedId), true);
+    } finally {
+      await releaseLobby(filled);
+    }
+  });
+
+  it("frees the seat immediately when the leave is consented", async () => {
+    const filled = await fillLobby(port, post);
+    try {
+      const droppedId = String(filled.seats[0].sessionId);
+      filled.sockets[0].close(4000);
+
+      await waitFor(() => !filled.room.state.players.has(droppedId) && !filled.room.isAtSeatCapacity());
+      const joined = await post(`/matchmake/joinById/${filled.roomId}`, { name: "Player 13" });
+      assert.equal(joined.status, 200, JSON.stringify(joined.json));
+    } finally {
+      await releaseLobby(filled);
+    }
+  });
 });
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return;
+    await delay(20);
+  }
+  throw new Error("timed out waiting for lobby seat change");
+}
+
+interface SeatReservation {
+  processId?: unknown;
+  roomId?: unknown;
+  sessionId?: unknown;
+}
+
+interface FilledLobby {
+  roomId: string;
+  room: LobbyRoom;
+  seats: SeatReservation[];
+  sockets: WebSocket[];
+}
+
+async function fillLobby(
+  port: number,
+  post: (path: string, body: unknown) => Promise<{ status: number; json: Record<string, unknown> }>,
+): Promise<FilledLobby> {
+  const created = await post("/matchmake/create/lobby", { name: "Player 1" });
+  assert.equal(created.status, 200, JSON.stringify(created.json));
+  const roomId = String(created.json.roomId);
+  const seats: SeatReservation[] = [created.json];
+  for (let index = 2; index <= MAX_ROOM_PLAYERS; index++) {
+    const joined = await post(`/matchmake/joinById/${roomId}`, { name: `Player ${index}` });
+    assert.equal(joined.status, 200, JSON.stringify(joined.json));
+    seats.push(joined.json);
+  }
+  const room = () => matchMaker.getLocalRoomById(roomId) as LobbyRoom;
+  const sockets: WebSocket[] = [];
+  for (const seat of seats) {
+    sockets.push(await openSocket(port, {
+      processId: String(seat.processId),
+      roomId,
+      sessionId: String(seat.sessionId),
+    }, room()));
+  }
+  await waitFor(() => room().state.players.size === MAX_ROOM_PLAYERS && room().clients.length === MAX_ROOM_PLAYERS);
+  return { roomId, room: room(), seats, sockets };
+}
+
+async function openSocket(
+  port: number,
+  seat: { processId: string; roomId: string; sessionId: string; reconnectionToken?: string },
+  room: LobbyRoom,
+): Promise<WebSocket> {
+  const token = seat.reconnectionToken ? `&reconnectionToken=${encodeURIComponent(seat.reconnectionToken)}` : "";
+  const ws = new WebSocket(
+    `ws://127.0.0.1:${port}/${seat.processId}/${seat.roomId}?sessionId=${seat.sessionId}${token}`,
+  );
+  ws.binaryType = "arraybuffer";
+  ws.addEventListener("message", (event) => {
+    const bytes = Buffer.from(event.data as ArrayBuffer);
+    if (bytes[0] === 10) ws.send(Buffer.from([10]));
+  });
+  await new Promise<void>((resolve, reject) => {
+    ws.addEventListener("open", () => resolve());
+    ws.addEventListener("error", () => reject(new Error(`socket failed for ${seat.sessionId}`)));
+  });
+  await waitFor(() => {
+    const client = room.clients.find((entry) => entry.sessionId === seat.sessionId);
+    return client?.state === ClientState.JOINED && room.state.players.has(seat.sessionId);
+  });
+  return ws;
+}
+
+function graceHandles(room: LobbyRoom): {
+  pending: Record<string, [string, { reject: (value: boolean) => void }]>;
+  timers: Record<string, ReturnType<typeof setTimeout>>;
+} {
+  const internal = room as unknown as {
+    _reconnections?: Record<string, [string, { reject: (value: boolean) => void }]>;
+    _reservedSeatTimeouts?: Record<string, ReturnType<typeof setTimeout>>;
+  };
+  return {
+    pending: internal._reconnections ?? {},
+    timers: internal._reservedSeatTimeouts ?? {},
+  };
+}
+
+function expireGrace(room: LobbyRoom, sessionId: string): void {
+  const { pending, timers } = graceHandles(room);
+  const timer = timers[sessionId];
+  const match = Object.values(pending).find((entry) => entry[0] === sessionId);
+  assert.ok(match, "grace reservation was not armed");
+  match[1].reject(false);
+  if (timer) clearTimeout(timer);
+}
+
+async function releaseLobby(filled: FilledLobby): Promise<void> {
+  const { pending, timers } = graceHandles(filled.room);
+  for (const entry of Object.values(pending)) entry[1].reject(false);
+  for (const timer of Object.values(timers)) clearTimeout(timer);
+  for (const socket of filled.sockets) {
+    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+      socket.close(4000);
+    }
+  }
+  await delay(100);
+}
