@@ -73,6 +73,89 @@ function pass(room: LobbyRoom, from: string, to: string) {
 }
 
 describe("Shield chains", () => {
+  it("Ana to Cy and Ben to Dee stay separate, so Dee owes 1", () => {
+    const { room, state, events } = resolution(
+      [
+        { id: "ana", name: "Ana", cards: ["SHIELD"] },
+        { id: "ben", name: "Ben", cards: ["SHIELD"] },
+        { id: "cy", name: "Cy" },
+        { id: "dee", name: "Dee" },
+      ],
+      ["ana", "ben"],
+    );
+
+    const toCy = pass(room, "ana", "cy");
+    const toDee = pass(room, "ben", "dee");
+
+    assert.equal(toCy.drinksToPass, 1);
+    assert.equal(toDee.drinksToPass, 1);
+    assert.equal(chain(state, "cy").drinks, 1);
+    assert.equal(chain(state, "dee").drinks, 1);
+    assert.equal(drinks(state, "dee"), 1);
+    assert.equal(owed(state, "dee"), 1);
+    assert.equal(chain(state, "cy").drinksToPass, 2);
+    assert.equal(chain(state, "dee").drinksToPass, 2);
+    assert.deepEqual(
+      events.map((event) => event.message.drinksToPass),
+      [1, 1],
+    );
+  });
+
+  it("merges two chains only when both land on the same player", () => {
+    const { room, state, events } = resolution(
+      [
+        { id: "ana", name: "Ana", cards: ["SHIELD"] },
+        { id: "ben", name: "Ben", cards: ["SHIELD"] },
+        { id: "cy", name: "Cy" },
+      ],
+      ["ana", "ben"],
+    );
+
+    assert.equal(pass(room, "ana", "cy").drinksToPass, 1);
+    assert.equal(chain(state, "cy").drinks, 1);
+    assert.equal(chain(state, "cy").drinksToPass, 2);
+
+    assert.equal(pass(room, "ben", "cy").drinksToPass, 1);
+    assert.equal(state.drinkChains.size, 1);
+    assert.equal(chain(state, "cy").drinks, 2);
+    assert.equal(chain(state, "cy").drinksToPass, 3);
+    assert.equal(drinks(state, "cy"), 2);
+    assert.equal(owed(state, "cy"), 2);
+    assert.deepEqual(
+      events.map((event) => event.message.drinksToPass),
+      [1, 1],
+    );
+  });
+
+  it("escalates one chain 1, then 2, then 3 across deflections", () => {
+    const { room, state } = resolution(
+      [
+        { id: "ana", name: "Ana", cards: ["SHIELD"] },
+        { id: "ben", name: "Ben", cards: ["SHIELD"] },
+        { id: "cy", name: "Cy", cards: ["SHIELD"] },
+        { id: "dee", name: "Dee" },
+      ],
+      ["ana"],
+    );
+
+    assert.equal(chain(state, "ana").drinksToPass, 1);
+    assert.equal(pass(room, "ana", "ben").drinksToPass, 1);
+    assert.equal(chain(state, "ben").drinks, 1);
+    assert.equal(chain(state, "ben").drinksToPass, 2);
+
+    assert.equal(pass(room, "ben", "cy").drinksToPass, 2);
+    assert.equal(chain(state, "cy").drinks, 2);
+    assert.equal(chain(state, "cy").drinksToPass, 3);
+
+    assert.equal(pass(room, "cy", "dee").drinksToPass, 3);
+    assert.equal(chain(state, "dee").drinks, 3);
+    assert.equal(chain(state, "dee").drinksToPass, 4);
+    assert.equal(drinks(state, "ana"), 0);
+    assert.equal(drinks(state, "ben"), 0);
+    assert.equal(drinks(state, "cy"), 0);
+    assert.equal(drinks(state, "dee"), 3);
+  });
+
   it("CRD-014: two independent shields each pass 1, and the second is not escalated", () => {
     for (const order of [
       ["a", "b"],

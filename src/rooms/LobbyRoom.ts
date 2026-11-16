@@ -21,9 +21,10 @@ const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", 
 const EXCLUDED_TURBO_GAMES = ["Hot Potato", "Rock Paper Scissors", "Simon Says"];
 
 /**
- * Drinks the next Shield passes for a player's merged total.
- * An untouched loss sends the drinks they currently hold.
- * Once a deflection is part of that total, the next pass sends those drinks plus 1. No cap.
+ * Next pass for one chain. The round has no global running total.
+ * An untouched chain sends the drinks it currently holds.
+ * After that chain has been deflected, the next pass is those drinks plus 1. No cap.
+ * Another chain does not change this number. Totals add only when both chains sit on the same holder.
  */
 export function shieldDrinksToPass(drinks: number, deflections: number): number {
   return deflections <= 0 ? drinks : drinks + 1;
@@ -318,9 +319,9 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * Pass this player's entire merged drink total.
-   * A target who already owes drinks keeps one total: the passed amount is added to it.
-   * The next Shield on that total is `drinks + 1` once any deflection is included.
+   * Pass this player's drink total. Escalation stays on this chain.
+   * A second chain elsewhere in the round does not add a drink.
+   * A target who already holds a chain keeps one total: the passed amount is added to it.
    * Any other player is a legal target, including a 2v2 teammate and the player who just passed.
    * The shielder cannot target themselves.
    * Returns null, and does not consume the card, when the play is rejected.
