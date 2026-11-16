@@ -5,6 +5,9 @@ import express from "express";
 import cors from "cors";
 import { LobbyRoom } from "./rooms/LobbyRoom";
 import { PracticeRoom } from "./rooms/PracticeRoom";
+import { installLobbyFullRoomError } from "./rooms/lobbyErrors";
+
+installLobbyFullRoomError();
 
 const app = express();
 app.use(cors());

@@ -376,9 +376,9 @@ describe("15s auto-discard", () => {
 
   it("does not change another player's hand", () => {
     const { room, player } = overflow();
-    const { player: bea } = addPlayer(room, "bea", "Bea", true);
-    award(room, "bea", "SHIELD", "bea");
-    award(room, "bea", "RESPIN", "bea");
+    const { player: bea } = addPlayer(room, "bea", "Bea");
+    award(room, "bea", "SHIELD", "ada");
+    award(room, "bea", "RESPIN", "ada");
 
     advance(room, PENDING_DISCARD_MS);
     assert.deepEqual(hand(player), ["MIDDLE", "NEWEST"]);
@@ -491,11 +491,12 @@ describe("round drop and turbo refund", () => {
   it("refunds TURBO onto a 2-card hand as the temporary third card", () => {
     const room = setup();
     const { player } = addPlayer(room, "ada", "Ada", true);
+    addPlayer(room, "bea", "Bea");
     award(room, "ada", "SHIELD");
     award(room, "ada", "RESPIN");
     player.activeEffects = JSON.stringify({ turbo: true, doublePoints: true });
 
-    room.forceWheelPhase("1v1", "Hot Potato", ["ada"]);
+    room.forceWheelPhase("1v1", "Hot Potato", ["ada", "bea"]);
 
     assert.deepEqual(hand(player), ["SHIELD", "RESPIN", "TURBO"]);
     assert.equal(player.pendingDiscard, true);
@@ -506,9 +507,10 @@ describe("round drop and turbo refund", () => {
 
   it("skips a TURBO refund that would be a 4th card", () => {
     const { room, player } = overflow(["SHIELD", "RESPIN", "WILD CARD"]);
+    addPlayer(room, "bea", "Bea");
     player.activeEffects = JSON.stringify({ turbo: true });
 
-    room.forceWheelPhase("BR", "Simon Says", ["ada"]);
+    room.forceWheelPhase("BR", "Simon Says", ["ada", "bea"]);
 
     assert.deepEqual(hand(player), ["SHIELD", "RESPIN", "WILD CARD"]);
     assert.equal(JSON.parse(player.activeEffects).turbo, false);
@@ -517,10 +519,11 @@ describe("round drop and turbo refund", () => {
   it("does not refund TURBO for a category that can use it", () => {
     const room = setup();
     const { player } = addPlayer(room, "ada", "Ada", true);
+    addPlayer(room, "bea", "Bea");
     award(room, "ada", "SHIELD");
     player.activeEffects = JSON.stringify({ turbo: true });
 
-    room.forceWheelPhase("1v1", "Tapping Race", ["ada"]);
+    room.forceWheelPhase("1v1", "Tapping Race", ["ada", "bea"]);
 
     assert.deepEqual(hand(player), ["SHIELD"]);
     assert.equal(JSON.parse(player.activeEffects).turbo, true);
@@ -541,6 +544,8 @@ describe("after the player picks", () => {
     assert.deepEqual(hand(player), ["RESPIN"]);
 
     room.state.phase = "lobby";
+    const { player: bea } = addPlayer(room, "bea", "Bea");
+    bea.isReady = true;
     emit(room, "ready", "ada", { isReady: true });
     assert.equal(room.state.phase, "chart");
     assert.equal(player.isReady, false);

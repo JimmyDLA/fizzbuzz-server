@@ -1,4 +1,4 @@
-import { CloseCode, Room, Client, ServerError } from "@colyseus/core";
+import { Room, Client, CloseCode, ServerError } from "@colyseus/core";
 import { DrinkChain, LobbyState, Player } from "./schema/LobbyState";
 import { IMiniGame } from "../games/IMiniGame";
 import { TappingRace } from "../games/TappingRace";
@@ -16,10 +16,15 @@ import { Perfection } from "../games/Perfection";
 import { applyDoublePoints, applyStandardScoring, scoreGameResult } from "./scoring";
 import { claimRoomCodeNow, releaseRoomCode } from "./roomCodes";
 import { specialtyCardDropPool, specialtyCardRarity } from "./specialtyCards";
+import { MAX_ROOM_PLAYERS, connectedPlayerIds, hasEnoughConnectedPlayers } from "./connectedPlayers";
+import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "./lobbyErrors";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
 const EXCLUDED_TURBO_GAMES = ["Hot Potato", "Rock Paper Scissors", "Simon Says"];
+
+/** How long an abnormal disconnect keeps its roster seat. */
+export const RECONNECT_GRACE_SECONDS = 120;
 
 /**
  * Next pass for one chain. The round has no global running total.
@@ -51,7 +56,7 @@ export const PENDING_DISCARD_MS = 15_000;
 
 export class LobbyRoom extends Room {
   state!: LobbyState;
-  maxClients = 8;
+  maxClients = MAX_ROOM_PLAYERS;
   gameLoopInterval: any;
   activeGame: IMiniGame | null = null;
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], cardAcquiredAt: number[], activeEffects: string }>();
@@ -60,6 +65,11 @@ export class LobbyRoom extends Room {
   private nextAcquiredAt = 1;
   private pendingDiscardTimers = new Map<string, { clear(): void }>();
   private isCardLocked: boolean = false;
+  /** Session ids inside the reconnect grace window. They hold a seat until they return or the window ends. */
+  private graceSessionIds = new Set<string>();
+  /** Original join order. A grace reconnect keeps the same number, so host selection stays stable. */
+  private nextJoinOrder = 0;
+  private joinOrder = new Map<string, number>();
   /** Deadlines for disconnected seated Shield targets. Cleared when they act, the window ends, or the seat is removed. */
   private shieldHold = new Map<string, { deadline: number; acted: boolean }>();
   private shieldHoldTimer: ReturnType<typeof setTimeout> | null = null;
@@ -93,11 +103,15 @@ export class LobbyRoom extends Room {
     this.onMessage("ready", (client, message) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
-      if (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution") {
+      const canReady = this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution";
+      if (canReady) {
         player.isReady = message.isReady;
         if (message?.isReady && player.isConnected) {
           this.markShieldHoldActed(client.sessionId);
         }
+      }
+      if (canReady && message?.isReady === true && this.state.phase === "lobby" && !hasEnoughConnectedPlayers(this.state.players)) {
+        client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
       }
       // Remember the press, but do not leave the phase until the extra card is gone.
       if (this.handBlocksActions(player)) return;
@@ -106,21 +120,26 @@ export class LobbyRoom extends Room {
 
     this.onMessage("start_wheel", (client) => {
       const player = this.state.players.get(client.sessionId);
-      if (player && player.isHost && this.state.phase === "chart") {
-        this.startWheelPhase();
+      if (player && this.isCurrentHost(player) && this.state.phase === "chart") {
+        if (!this.startWheelPhase()) {
+          client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
+        }
       }
     });
 
     this.onMessage("dev_start_wheel", (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      if (player && player.isHost && this.state.phase === "chart") {
-        this.forceWheelPhase(message.type, message.category, message.selectedPlayers);
+      if (player && this.isCurrentHost(player) && this.state.phase === "chart") {
+        const selectedPlayers = Array.isArray(message?.selectedPlayers) ? message.selectedPlayers : [];
+        if (!this.forceWheelPhase(message?.type, message?.category, selectedPlayers)) {
+          client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
+        }
       }
     });
 
     this.onMessage("dev_award_card", (client, message) => {
       const hostPlayer = this.state.players.get(client.sessionId);
-      if (!hostPlayer || !hostPlayer.isHost) return;
+      if (!this.isCurrentHost(hostPlayer)) return;
 
       const targetPlayerId = message.targetPlayerId || client.sessionId;
       const cardId = message.cardId;
@@ -185,7 +204,7 @@ export class LobbyRoom extends Room {
           this.removeCardAt(player, cardIndex);
 
           const category = message.category || CATEGORIES[0];
-          const selectedPlayers = message.selectedPlayers || Array.from(this.state.players.keys()).slice(0, 2);
+          const selectedPlayers = message.selectedPlayers || connectedPlayerIds(this.state.players).slice(0, 2);
           const type = message.type || (selectedPlayers.length === 2 ? "1v1" : selectedPlayers.length === 4 ? "2v2" : "BR");
 
           // Reset ready status for all players
@@ -319,18 +338,18 @@ export class LobbyRoom extends Room {
     });
 
     if (existingPlayerId) {
-      // Inherit state from the disconnected session
+      // Inherit state from the disconnected session. Host is chosen afterwards,
+      // so a stale isHost flag cannot follow the player onto a new session.
       const oldPlayer = this.state.players.get(existingPlayerId);
       if (oldPlayer) {
         player.score = oldPlayer.score;
         player.drinks = oldPlayer.drinks;
-        player.isHost = oldPlayer.isHost;
         this.copyHeldCards(player, oldPlayer.cards, this.cardAcquiredAt.get(existingPlayerId));
         player.activeEffects = oldPlayer.activeEffects;
       }
+      this.keepJoinOrder(client.sessionId, existingPlayerId);
       this.clearPendingDiscardTimer(existingPlayerId);
       this.cardAcquiredAt.delete(existingPlayerId);
-      // Remove the old player object
       this.state.players.delete(existingPlayerId);
       console.log(`[Rejoin] ${player.name} rejoined from active disconnected session.`);
     } else if (this.disconnectedPlayersCache.has(nameLower)) {
@@ -352,17 +371,30 @@ export class LobbyRoom extends Room {
 
     // A rejoin must not restore a hand over the cap. Drop the card held longest, same as the 15s timeout.
     this.discardOldestOverCap(player);
-
-    // Resolve host status: if no host exists in the lobby, make this player host
-    let hostExists = false;
-    this.state.players.forEach(p => {
-      if (p.isHost) hostExists = true;
-    });
-    if (!hostExists && this.state.players.size === 0) {
-      player.isHost = true;
-    }
-
+    this.keepJoinOrder(client.sessionId);
     this.state.players.set(client.sessionId, player);
+    this.ensureConnectedHost();
+  }
+
+  /** Original join position. Unchanged when a grace player reconnects with the same session. */
+  joinSequence(sessionId: string): number {
+    const order = this.joinOrder.get(sessionId);
+    if (order === undefined) throw new Error(`no join sequence for ${sessionId}`);
+    return order;
+  }
+
+  private keepJoinOrder(sessionId: string, inheritedFrom?: string) {
+    if (inheritedFrom) {
+      const inherited = this.joinOrder.get(inheritedFrom);
+      this.joinOrder.delete(inheritedFrom);
+      if (inherited !== undefined) {
+        this.joinOrder.set(sessionId, inherited);
+        return;
+      }
+    }
+    if (!this.joinOrder.has(sessionId)) {
+      this.joinOrder.set(sessionId, this.nextJoinOrder++);
+    }
   }
 
   /**
@@ -512,23 +544,63 @@ export class LobbyRoom extends Room {
     this.state.lastGameResult = "";
   }
 
-  private ensureConnectedHost() {
-    let hasConnectedHost = false;
-    this.state.players.forEach(p => {
-      if (p.isConnected && p.isHost) {
-        hasConnectedHost = true;
-      }
+  /**
+   * Host-only actions must use this. True only for the single connected host,
+   * so an offline flag cannot spin the wheel.
+   */
+  private isCurrentHost(player: Player | undefined): boolean {
+    if (!player?.isHost || !player.isConnected) return false;
+    let connectedHosts = 0;
+    this.state.players.forEach((candidate) => {
+      if (candidate.isConnected && candidate.isHost) connectedHosts += 1;
     });
+    return connectedHosts === 1;
+  }
 
-    if (!hasConnectedHost) {
-      for (const [, p] of this.state.players.entries()) {
-        if (p.isConnected) {
-          p.isHost = true;
-          console.log(`[Host] Promoted ${p.name} to host.`);
-          break;
-        }
-      }
+  /**
+   * Whenever at least one player is connected, exactly one connected player is host.
+   * An offline host is cleared as soon as someone connected can take the role.
+   * A new host is the earliest-joined connected player. An existing connected host
+   * is left in place, so a later reconnect does not steal the role.
+   */
+  private ensureConnectedHost() {
+    const connected: Array<{ player: Player; order: number }> = [];
+    this.state.players.forEach((player, sessionId) => {
+      if (!player.isConnected) return;
+      connected.push({ player, order: this.joinOrder.get(sessionId) ?? Number.MAX_SAFE_INTEGER });
+    });
+    if (connected.length === 0) return;
+
+    const connectedHosts = connected.filter((entry) => entry.player.isHost);
+    let host = connectedHosts.length === 1 ? connectedHosts[0].player : undefined;
+    if (!host) {
+      connected.sort((a, b) => a.order - b.order);
+      host = connected[0].player;
+      console.log(`[Host] Promoted ${host.name} to host.`);
     }
+    this.state.players.forEach((player) => {
+      player.isHost = player === host;
+    });
+  }
+
+  /**
+   * Live sockets plus seat reservations. A reconnect-grace reservation is included,
+   * so a full room stays full until that player returns or the grace window ends.
+   */
+  heldSeatCount(): number {
+    const reservedIds = new Set(Object.keys(
+      (this as unknown as { _reservedSeats?: Record<string, unknown> })._reservedSeats ?? {},
+    ));
+    let unreservedGrace = 0;
+    for (const sessionId of this.graceSessionIds) {
+      const stillSeated = this.clients.some((connected) => connected.sessionId === sessionId);
+      if (!stillSeated && !reservedIds.has(sessionId)) unreservedGrace += 1;
+    }
+    return this.clients.length + reservedIds.size + unreservedGrace;
+  }
+
+  isAtSeatCapacity(): boolean {
+    return this.heldSeatCount() >= MAX_ROOM_PLAYERS;
   }
 
   async onLeave(client: Client, code?: number) {
@@ -584,11 +656,15 @@ export class LobbyRoom extends Room {
       });
       this.removePlayer(client.sessionId);
     } else {
+      // Hold the seat for the whole grace window, including the moment before
+      // Colyseus records the reconnection reservation.
+      this.graceSessionIds.add(client.sessionId);
       console.log(client.sessionId, "abnormal leave! Waiting 120s...");
       try {
-        await this.allowReconnection(client, 120);
+        await this.allowReconnection(client, RECONNECT_GRACE_SECONDS);
         console.log(client.sessionId, "successfully reconnected!");
         player.isConnected = true;
+        this.ensureConnectedHost();
       } catch (e) {
         console.log(client.sessionId, "grace period expired!");
         // Save stats to cache
@@ -600,6 +676,8 @@ export class LobbyRoom extends Room {
           activeEffects: player.activeEffects || "{}"
         });
         this.removePlayer(client.sessionId);
+      } finally {
+        this.graceSessionIds.delete(client.sessionId);
       }
     }
   }
@@ -779,9 +857,9 @@ export class LobbyRoom extends Room {
   }
 
   private removePlayer(sessionId: string) {
+    this.joinOrder.delete(sessionId);
     this.clearPendingDiscardTimer(sessionId);
     this.cardAcquiredAt.delete(sessionId);
-    const wasHost = this.state.players.get(sessionId)?.isHost;
     this.dropDrinkChain(sessionId);
     this.state.players.delete(sessionId);
 
@@ -790,7 +868,7 @@ export class LobbyRoom extends Room {
       this.state.selectedPlayers.splice(idx, 1);
     }
 
-    if (wasHost && this.state.players.size > 0) {
+    if (this.state.players.size > 0) {
       this.ensureConnectedHost();
     }
     this.shieldHold.delete(sessionId);
@@ -832,6 +910,9 @@ export class LobbyRoom extends Room {
 
     if (allReady) {
       if (this.state.phase === "lobby") {
+        if (!hasEnoughConnectedPlayers(this.state.players)) {
+          return;
+        }
         this.state.players.forEach(p => p.isReady = false);
         this.state.phase = "chart";
       } else if (this.state.phase === "wheel") {
@@ -917,20 +998,46 @@ export class LobbyRoom extends Room {
     }
   }
 
-  startWheelPhase() {
+  startWheelPhase(): boolean {
+    const contestantIds = connectedPlayerIds(this.state.players);
+    if (!hasEnoughConnectedPlayers(this.state.players)) {
+      return false;
+    }
+
+    let gameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
+    const category = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
+
+    // Enforce Category Restrictions
+    if (category === "Rock Paper Scissors" || category === "Simon Says" || category === "Perfection") {
+      if (gameType === "2v2") gameType = "1v1";
+    } else if (category === "Hot Potato" && gameType === "2v2") {
+      gameType = "1v1"; // Fallback from 2v2 for Hot Potato
+    }
+
+    for (let i = contestantIds.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [contestantIds[i], contestantIds[j]] = [contestantIds[j], contestantIds[i]];
+    }
+
+    let requiredPlayers = contestantIds.length;
+    if (gameType === "1v1") requiredPlayers = 2;
+    if (gameType === "2v2") requiredPlayers = 4;
+
+    // Not enough connected contestants for the drawn mode. Never start a 1-player BR.
+    if (requiredPlayers > contestantIds.length) {
+      if (!hasEnoughConnectedPlayers(this.state.players, contestantIds)) {
+        return false;
+      }
+      gameType = "1v1";
+      requiredPlayers = 2;
+    }
+
     this.isCardLocked = false;
     this.clearDrinkChains();
     this.clearShieldHolds();
     this.state.phase = "wheel";
-    this.state.currentGameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
-    this.state.currentCategory = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
-
-    // Enforce Category Restrictions
-    if (this.state.currentCategory === "Rock Paper Scissors" || this.state.currentCategory === "Simon Says" || this.state.currentCategory === "Perfection") {
-      if (this.state.currentGameType === "2v2") this.state.currentGameType = "1v1";
-    } else if (this.state.currentCategory === "Hot Potato" && this.state.currentGameType === "2v2") {
-      this.state.currentGameType = "1v1"; // Fallback from 2v2 for Hot Potato
-    }
+    this.state.currentGameType = gameType;
+    this.state.currentCategory = category;
 
     // Refund any active Turbo cards if category is excluded
     if (EXCLUDED_TURBO_GAMES.includes(this.state.currentCategory)) {
@@ -948,39 +1055,23 @@ export class LobbyRoom extends Room {
       });
     }
 
-    // Select subset of players
-    const allPlayerIds = Array.from(this.state.players.keys());
-    for (let i = allPlayerIds.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [allPlayerIds[i], allPlayerIds[j]] = [allPlayerIds[j], allPlayerIds[i]];
-    }
-
-    let requiredPlayers = allPlayerIds.length;
-    if (this.state.currentGameType === "1v1") requiredPlayers = 2;
-    if (this.state.currentGameType === "2v2") requiredPlayers = 4;
-
-    // Fallback if not enough players for the drawn game type
-    if (requiredPlayers > allPlayerIds.length) {
-      if (allPlayerIds.length >= 2) {
-        this.state.currentGameType = "1v1";
-        requiredPlayers = 2;
-      } else {
-        this.state.currentGameType = "BR";
-        requiredPlayers = allPlayerIds.length;
-      }
-    }
-
     this.state.selectedPlayers.clear();
-    allPlayerIds.slice(0, requiredPlayers).forEach(id => this.state.selectedPlayers.push(id));
+    contestantIds.slice(0, requiredPlayers).forEach(id => this.state.selectedPlayers.push(id));
 
     this.broadcast("SpinWheelEvent", {
       type: this.state.currentGameType,
       category: this.state.currentCategory,
       selectedPlayers: this.state.selectedPlayers.toArray()
     });
+    return true;
   }
 
-  forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]) {
+  forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]): boolean {
+    const contestantIds = connectedPlayerIds(this.state.players, selectedPlayerIds);
+    if (!hasEnoughConnectedPlayers(this.state.players, contestantIds)) {
+      return false;
+    }
+
     this.isCardLocked = false;
     this.clearDrinkChains();
     this.clearShieldHolds();
@@ -1005,13 +1096,14 @@ export class LobbyRoom extends Room {
     }
 
     this.state.selectedPlayers.clear();
-    selectedPlayerIds.forEach(id => this.state.selectedPlayers.push(id));
+    contestantIds.forEach(id => this.state.selectedPlayers.push(id));
 
     this.broadcast("SpinWheelEvent", {
       type: this.state.currentGameType,
       category: this.state.currentCategory,
       selectedPlayers: this.state.selectedPlayers.toArray()
     });
+    return true;
   }
 
   startCountdownPhase() {
