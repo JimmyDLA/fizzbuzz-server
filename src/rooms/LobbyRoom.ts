@@ -280,7 +280,9 @@ export class LobbyRoom extends Room {
 
     this.onMessage("discard_card", (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      if (!player) return;
+      // Only the open overflow choice may discard. A late pick after the
+      // timeout, or a discard with no pending overflow, removes nothing.
+      if (!player || !player.pendingDiscard || player.cards.length <= HAND_CAP) return;
 
       let removed = false;
       if (typeof message.cardIndex === "number" && message.cardIndex >= 0 && message.cardIndex < player.cards.length) {
@@ -647,10 +649,14 @@ export class LobbyRoom extends Room {
 
   /** No pick (15s timeout, disconnect, or rejoin over the cap): drop the card held the longest. */
   private discardOldestOverCap(player: Player): void {
+    const overflow = player.cards.length > HAND_CAP;
+    // Clear the choice before the hand changes so a discard_card in this same
+    // turn cannot remove a second card.
+    this.clearPendingDiscard(player);
+    if (!overflow) return;
     while (player.cards.length > HAND_CAP) {
       this.removeCardAt(player, this.oldestHeldIndex(player));
     }
-    this.clearPendingDiscard(player);
   }
 
   distributeSpecialtyCards() {
