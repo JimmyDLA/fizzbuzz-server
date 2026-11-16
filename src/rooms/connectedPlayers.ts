@@ -1,10 +1,11 @@
 /**
  * Start gate for a party match.
  *
- * Only players with `isConnected === true` count. A seat cached during the
- * reconnect grace period is not connected and does not count. Ready to Spin
- * and every other start path should call `hasEnoughConnectedPlayers` before
- * leaving the lobby or spinning the wheel.
+ * Only players with `isConnected === true` count toward starting a match.
+ * A seat in the reconnect grace window still occupies a roster slot (see
+ * LobbyRoom.heldSeatCount) but is not connected, so it does not count here.
+ * Ready to Spin and every other start path should call
+ * `hasEnoughConnectedPlayers` before leaving the lobby or spinning the wheel.
  */
 export const MAX_ROOM_PLAYERS = 12;
 export const MIN_CONNECTED_PLAYERS = 2;

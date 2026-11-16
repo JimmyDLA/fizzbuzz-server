@@ -65,11 +65,31 @@ export function installLobbyFullRoomError(): void {
   const original = controller.invokeMethod.bind(controller);
   controller.invokeMethod = async function (method, roomName, clientOptions, authOptions) {
     try {
+      // Reject before Colyseus reserves a seat. Grace reservations count, and
+      // the grace player's own /matchmake/reconnect path does not come through here.
+      await rejectJoinWhenLobbyIsFull(method, roomName);
       return await original(method, roomName, clientOptions, authOptions);
     } catch (error) {
       throw await rewriteFullLobbyJoinError(method, roomName, error);
     }
   };
+}
+
+async function rejectJoinWhenLobbyIsFull(method: string, roomName: string): Promise<void> {
+  if (method !== "joinById") return;
+
+  let listing: { name?: string } | undefined;
+  try {
+    listing = await matchMaker.getRoomById(roomName);
+  } catch {
+    return;
+  }
+  if (listing?.name !== "lobby") return;
+
+  const room = matchMaker.getLocalRoomById(roomName) as { isAtSeatCapacity?: () => boolean } | undefined;
+  if (room?.isAtSeatCapacity?.()) {
+    throw new ServerError(ErrorCode.MATCHMAKE_INVALID_ROOM_ID, formatLobbyError(roomFullError()));
+  }
 }
 
 async function rewriteFullLobbyJoinError(method: string, roomName: string, error: unknown): Promise<unknown> {
