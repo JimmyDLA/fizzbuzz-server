@@ -29,6 +29,11 @@ export class RockPaperScissors implements IMiniGame {
   private suddenDeath: boolean = false;
   /** Latched when the room clock passes 0, so later timer holds do not look like time is left. */
   private regulationExpired: boolean = false;
+  /** The two players actually throwing. A Battle Royale sub changes this pair. */
+  private activePair: [string, string] | null = null;
+  /** Set when the match banner is shown, so onEnd pays that same player. */
+  private matchWinnerId: string | null = null;
+  private matchLoserId: string | null = null;
 
   onInit(state: LobbyState): void {
     this.picks.clear();
@@ -40,6 +45,9 @@ export class RockPaperScissors implements IMiniGame {
     this.isEnded = false;
     this.suddenDeath = false;
     this.regulationExpired = false;
+    this.activePair = null;
+    this.matchWinnerId = null;
+    this.matchLoserId = null;
 
     const gameData = {
       choices: ["rock", "paper", "scissors"],
@@ -59,6 +67,7 @@ export class RockPaperScissors implements IMiniGame {
         p.gameData = JSON.stringify(gameData);
       }
     });
+    this.activePair = this.contestants(state);
   }
 
   onMessage(client: Client, message: any, state: LobbyState): void {
@@ -67,8 +76,10 @@ export class RockPaperScissors implements IMiniGame {
     if (this.picks.has(client.sessionId)) return;
     if (this.animationStartTime > 0) return;
     if (typeof message.choice !== "string") return;
+    const choice = message.choice.toLowerCase();
+    if (choice !== "rock" && choice !== "paper" && choice !== "scissors") return;
 
-    this.picks.set(client.sessionId, message.choice.toLowerCase());
+    this.picks.set(client.sessionId, choice);
 
     const picksStatus: any = {};
     this.picks.forEach((_, id) => picksStatus[id] = true);
@@ -306,9 +317,61 @@ export class RockPaperScissors implements IMiniGame {
     this.pickDeadline = Date.now() + SUDDEN_DEATH_PICK_MS;
   }
 
+  /**
+   * Battle Royale removes the leaver from selectedPlayers before this runs.
+   * A new contestant takes the dropped player's round wins and both players
+   * start a fresh throw, so a leftover pick window cannot decide the match.
+   */
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    if (this.isEnded) return;
+    const previous = this.activePair;
+    const next = this.contestants(state);
+    this.activePair = next;
+    if (!previous || !next) return;
+    const wasContestant = previous[0] === sessionId || previous[1] === sessionId;
+    if (!wasContestant) return;
+    if (next[0] === sessionId || next[1] === sessionId) return;
+
+    const stayer = previous[0] === sessionId ? previous[1] : previous[0];
+    const stayerStillPlaying = next[0] === stayer || next[1] === stayer;
+    if (stayerStillPlaying) {
+      const incoming = next[0] === stayer ? next[1] : next[0];
+      this.roundScores.set(incoming, this.roundScores.get(sessionId) || 0);
+    }
+    this.roundScores.delete(sessionId);
+    this.beginFreshThrow(state);
+  }
+
+  private beginFreshThrow(state: LobbyState): void {
+    this.picks.clear();
+    this.animationStartTime = 0;
+    this.revealTime = 0;
+    this.pickDeadline = 0;
+    this.tieResetTime = 0;
+
+    if (this.suddenDeath || this.regulationExpired) {
+      this.suddenDeath = true;
+      this.pickDeadline = Date.now() + SUDDEN_DEATH_PICK_MS;
+      if (state.timer < 1) state.timer = 1;
+    }
+
+    this.broadcast(state, {
+      picks: {},
+      results: {},
+      reveal: false,
+      scores: this.scoreMap(state),
+      animationWord: "FRESH THROW!",
+      suddenDeath: this.suddenDeath,
+      gameOver: false
+    });
+  }
+
   private endMatch(state: LobbyState, winnerId: string): void {
     this.isEnded = true;
     this.pickDeadline = 0;
+    this.matchWinnerId = winnerId;
+    const pair = this.contestants(state);
+    this.matchLoserId = pair ? (pair[0] === winnerId ? pair[1] : pair[0]) : null;
     const name = state.players.get(winnerId)?.name || "Winner";
     this.broadcast(state, {
       scores: this.scoreMap(state),
@@ -366,15 +429,21 @@ export class RockPaperScissors implements IMiniGame {
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    if (score1 > score2 && score1 > 0) {
+    const pair = [p1Id, p2Id];
+    if (this.matchWinnerId && pair.includes(this.matchWinnerId)) {
+      state.lastWinners.push(this.matchWinnerId);
+      if (this.matchLoserId && pair.includes(this.matchLoserId) && this.matchLoserId !== this.matchWinnerId) {
+        state.lastLosers.push(this.matchLoserId);
+      }
+    } else if (score1 > score2 && score1 > 0) {
       state.lastWinners.push(p1Id);
       state.lastLosers.push(p2Id);
     } else if (score2 > score1 && score2 > 0) {
       state.lastWinners.push(p2Id);
       state.lastLosers.push(p1Id);
     }
-    // A level score is not a result. Sudden death replays until someone wins,
-    // so this does not mark either player a loser and does not award a tie.
+    // A level score with no declared winner is not a result. Sudden death
+    // replays until someone wins, so nobody is marked a loser and nobody is paid.
 
     const leaderboard = ids.map(id => {
       const p = state.players.get(id);

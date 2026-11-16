@@ -1078,6 +1078,183 @@ describe("Rock Paper Scissors", () => {
     });
   });
 
+  function view(state: LobbyState, id: string): any {
+    return JSON.parse(player(state, id).gameData);
+  }
+
+  function dropSelected(state: LobbyState, id: string): void {
+    const idx = state.selectedPlayers.indexOf(id);
+    if (idx !== -1) state.selectedPlayers.splice(idx, 1);
+  }
+
+  it("BR substitute inherits the seat and the paid winner matches the banner", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+    });
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 30;
+    withClock((advance) => {
+      playRound(game, state, "rock", "scissors", advance);
+      playRound(game, state, "rock", "paper", advance);
+      state.timer = 0;
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+
+      dropSelected(state, "a");
+      game.onPlayerDisconnect("a", state);
+
+      const swapped = view(state, "c");
+      assert.equal(swapped.animationWord, "FRESH THROW!");
+      assert.deepEqual(swapped.picks, {});
+      assert.equal(swapped.scores.b, 1);
+      assert.equal(swapped.scores.c, 1);
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "c").drinks, 0);
+
+      game.onMessage(client("b"), { action: "pick", choice: "rock" }, state);
+      game.onMessage(client("c"), { action: "pick", choice: "paper" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      assert.equal(view(state, "c").animationWord, "Cal WINS MATCH!");
+
+      finish(game, state, {
+        scores: { a: score(0), b: score(0, 1), c: score(3) },
+        winners: ["c"],
+        losers: ["b"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "c", playerName: "Cal", scoreLabel: "Winner! (2 Wins)", isWinner: true },
+            { playerId: "b", playerName: "Bea", scoreLabel: "Defeated (1 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("BR substitute gets a fresh throw window instead of the leftover one", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+    });
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 0;
+    withClock((advance) => {
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+      game.onMessage(client("a"), { action: "pick", choice: "rock" }, state);
+      advance(SUDDEN_DEATH_PICK_MS - 1000);
+
+      dropSelected(state, "b");
+      game.onPlayerDisconnect("b", state);
+      assert.equal(view(state, "c").animationWord, "FRESH THROW!");
+      assert.deepEqual(view(state, "c").picks, {});
+
+      advance(2000);
+      game.onTick(state);
+      assert.notEqual(view(state, "a").animationWord, "Ada WINS MATCH!");
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "c").drinks, 0);
+      assert.equal(player(state, "c").score, 0);
+
+      game.onMessage(client("a"), { action: "pick", choice: "scissors" }, state);
+      game.onMessage(client("c"), { action: "pick", choice: "rock" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      assert.equal(view(state, "c").animationWord, "Cal WINS MATCH!");
+
+      finish(game, state, {
+        scores: { a: score(0, 1), b: score(0), c: score(3) },
+        winners: ["c"],
+        losers: ["a"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "c", playerName: "Cal", scoreLabel: "Winner! (1 Wins)", isWinner: true },
+            { playerId: "a", playerName: "Ada", scoreLabel: "Defeated (0 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("a non-contestant leaving Battle Royale does not reset the open throw", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+    });
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 0;
+    withClock((advance) => {
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+      game.onMessage(client("a"), { action: "pick", choice: "paper" }, state);
+      dropSelected(state, "c");
+      game.onPlayerDisconnect("c", state);
+      assert.deepEqual(view(state, "a").picks, { a: true });
+      assert.notEqual(view(state, "a").animationWord, "FRESH THROW!");
+
+      advance(SUDDEN_DEATH_PICK_MS + 1);
+      game.onTick(state);
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1), c: score(0) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
+      });
+    });
+  });
+
+  it("ignores a choice other than rock, paper, or scissors", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    withClock((advance) => {
+      game.onMessage(client("a"), { action: "pick", choice: "banana" }, state);
+      game.onMessage(client("b"), { action: "pick", choice: "rock" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      assert.deepEqual(view(state, "a").picks, { b: true });
+      assert.equal(view(state, "a").reveal, false);
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "b").drinks, 0);
+
+      game.onMessage(client("a"), { action: "pick", choice: "ROCK" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      assert.equal(word(state), "TIE! TRY AGAIN...");
+      assert.equal(player(state, "b").drinks, 0);
+    });
+  });
+
   it("MIN-016 Battle Royale only scores the first two selected players", () => {
     const state = makeState({
       type: "BR",
