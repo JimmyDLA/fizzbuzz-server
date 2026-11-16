@@ -369,6 +369,31 @@ describe("Math Problem", () => {
       gameScores: { a: 3, b: 3 },
     });
   });
+
+  it("a Turbo point on a blank board is no action, so everyone loses", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada", effects: JSON.stringify({ turbo: true }) },
+        { id: "b", name: "Bea" },
+      ],
+    });
+    finish(new MathProblem(), state, {
+      scores: { a: score(0, 1), b: score(0, 1) },
+      winners: [],
+      losers: ["a", "b"],
+      tiedIds: [],
+      gameScores: { a: 0, b: 0 },
+      result: {
+        type: "timeline",
+        title: "Math Breakdown",
+        timeline: [
+          { playerId: "a", playerName: "Ada", scoreValue: 0, scoreLabel: "0 Points", isWinner: false, events: [] },
+          { playerId: "b", playerName: "Bea", scoreValue: 0, scoreLabel: "0 Points", isWinner: false, events: [] },
+        ],
+      },
+    });
+  });
 });
 
 describe("Trivia", () => {
@@ -458,6 +483,31 @@ describe("Trivia", () => {
       losers: ["b"],
       tiedIds: [],
       gameScores: { a: 2, b: 1 },
+    });
+  });
+
+  it("a Turbo point on a blank board is no action, so everyone loses", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea", effects: JSON.stringify({ turbo: true }) },
+      ],
+    });
+    finish(new Trivia(), state, {
+      scores: { a: score(0, 1), b: score(0, 1) },
+      winners: [],
+      losers: ["a", "b"],
+      tiedIds: [],
+      gameScores: { a: 0, b: 0 },
+      result: {
+        type: "timeline",
+        title: "Trivia Breakdown",
+        timeline: [
+          { playerId: "a", playerName: "Ada", scoreValue: 0, scoreLabel: "0 Points", isWinner: false, events: [] },
+          { playerId: "b", playerName: "Bea", scoreValue: 0, scoreLabel: "0 Points", isWinner: false, events: [] },
+        ],
+      },
     });
   });
 });
@@ -1322,6 +1372,34 @@ describe("Simon Says", () => {
       winners: ["a", "b"],
       losers: ["c"],
       tiedIds: ["a", "b"],
+    });
+  });
+
+  it("timer runs out at round 0 with players still in: everyone loses", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+    });
+    player(state, "a").gameData = JSON.stringify({
+      winners: [],
+      activePlayers: ["a", "b", "c"],
+      currentRound: 1,
+    });
+    finish(new SimonSays(), state, {
+      scores: { a: score(0, 1), b: score(0, 1), c: score(0, 1) },
+      winners: [],
+      losers: ["a", "b", "c"],
+      tiedIds: [],
+      gameScores: { a: 0, b: 0, c: 0 },
+      result: board("Simon Says Results", [
+        { playerId: "a", playerName: "Ada", scoreValue: 0, scoreLabel: "Survived 0 Rounds", isWinner: false },
+        { playerId: "b", playerName: "Bea", scoreValue: 0, scoreLabel: "Survived 0 Rounds", isWinner: false },
+        { playerId: "c", playerName: "Cal", scoreValue: 0, scoreLabel: "Survived 0 Rounds", isWinner: false },
+      ]),
     });
   });
 });

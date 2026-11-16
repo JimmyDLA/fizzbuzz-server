@@ -299,18 +299,26 @@ export class Trivia implements IMiniGame {
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
-    // Apply Turbo effect (+1 extra point at the end)
+    // Answers only. A Turbo +1 by itself is not acting.
+    const answered: Record<string, number> = {};
     ids.forEach(id => {
-      const p = state.players.get(id);
-      if (p && p.activeEffects) {
-        try {
-          const fx = JSON.parse(p.activeEffects);
-          if (fx.turbo) {
-            p.gameScore += 1;
-          }
-        } catch (e) {}
-      }
+      answered[id] = state.players.get(id)?.gameScore || 0;
     });
+    const anyoneAnswered = ids.some(id => answered[id] > 0);
+
+    if (anyoneAnswered) {
+      ids.forEach(id => {
+        const p = state.players.get(id);
+        if (p && p.activeEffects) {
+          try {
+            const fx = JSON.parse(p.activeEffects);
+            if (fx.turbo) {
+              p.gameScore += 1;
+            }
+          } catch (e) {}
+        }
+      });
+    }
 
     if (state.currentGameType === "2v2" && ids.length === 4) {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
@@ -388,10 +396,7 @@ export class Trivia implements IMiniGame {
       timeline
     });
 
-    const actionScores: Record<string, number> = {};
-    ids.forEach(id => {
-      actionScores[id] = state.players.get(id)?.gameScore || 0;
-    });
+    const actionScores = answered;
 
     return {
       winners: state.lastWinners.toArray(),
