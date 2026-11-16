@@ -387,6 +387,16 @@ describe("pot split", () => {
     assert.ok(Math.abs(qaById.p1 - qaById.p6) <= 1);
     assert.equal(qaShares.reduce((sum, share) => sum + share.payout, 0), 7);
 
+    // A remainder-pass redirect and the one-at-a-time fallback share one
+    // rotation. Standings 12,12,12,12,3 and pot 2 used to pay 2,0,0,0,0.
+    const fourWay = splitPot(
+      [12, 12, 12, 12, 3].map((standing, index) => ({ playerId: `p${index}`, standing })),
+      2,
+    );
+    assert.deepEqual(fourWay.map((share) => share.payout), [1, 1, 0, 0, 0]);
+    assert.deepEqual(fourWay.map((share) => share.rank), [1, 1, 1, 1, 5]);
+    assert.equal(fourWay.reduce((sum, share) => sum + share.payout, 0), 2);
+
     // Unequal stakes stay proportional. a and b are tied, but a staked more.
     const uneven = splitPot(tiedFirst, 6, { a: 3, b: 1, c: 1 });
     assert.deepEqual(uneven.map((share) => share.payout), [4, 1, 1]);
@@ -545,6 +555,38 @@ describe("pot split", () => {
 
     const none = splitPot(distinctPlacements(3), 0, { p1: 0, p2: 0, p3: 0 });
     assert.deepEqual(none.map((share) => share.payout), [0, 0, 0]);
+  });
+
+  it("keeps equal-stake tied leaders within 1 across random boards", () => {
+    let seed = 0x6d2b79f5;
+    const rand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    for (let trial = 0; trial < 20000; trial += 1) {
+      const count = 2 + Math.floor(rand() * 11);
+      const placements = Array.from({ length: count }, (_, index) => ({
+        playerId: `p${index}`,
+        standing: Math.floor(rand() * 16),
+      }));
+      const pot = Math.floor(rand() * 40);
+      const stake = 1 + Math.floor(rand() * 3);
+      const stakes: Record<string, number> = {};
+      for (const placement of placements) stakes[placement.playerId] = stake;
+      for (const shares of [splitPot(placements, pot), splitPot(placements, pot, stakes)]) {
+        const top = Math.max(...placements.map((placement) => placement.standing));
+        const topIds = new Set(
+          placements.filter((placement) => placement.standing === top).map((placement) => placement.playerId),
+        );
+        const pays = shares.filter((share) => topIds.has(share.playerId)).map((share) => share.payout);
+        const gap = Math.max(...pays) - Math.min(...pays);
+        assert.ok(
+          gap <= 1,
+          `trial ${trial} standings ${placements.map((placement) => placement.standing).join(",")} pot ${pot} stake ${stake} pays ${shares.map((share) => share.payout).join(",")}`,
+        );
+        assert.equal(shares.reduce((sum, share) => sum + share.payout, 0), pot);
+      }
+    }
   });
 });
 
