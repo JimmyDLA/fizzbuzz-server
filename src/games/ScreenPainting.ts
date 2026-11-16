@@ -131,10 +131,16 @@ export class ScreenPainting implements IMiniGame {
       leaderboard
     });
 
+    const actionScores: Record<string, number> = {};
+    connectedSelectedIds.forEach(id => {
+      actionScores[id] = state.players.get(id)?.gameScore || 0;
+    });
+
     return {
       winners: state.lastWinners.toArray(),
       losers: state.lastLosers.toArray(),
       tiedIds,
+      actionScores,
     };
   }
 }

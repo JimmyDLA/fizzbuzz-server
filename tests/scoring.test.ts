@@ -14,6 +14,7 @@ import { TappingRace } from "../src/games/TappingRace";
 import { Trivia } from "../src/games/Trivia";
 import { LobbyRoom } from "../src/rooms/LobbyRoom";
 import { LobbyState } from "../src/rooms/schema/LobbyState";
+import { scoreGameResult } from "../src/rooms/scoring";
 import {
   client,
   finish,
@@ -29,7 +30,7 @@ import {
  * Scoring outcomes for every mini-game. Each game reports winners, losers, and
  * who tied; LobbyRoom applies +3 and one drink. These quirks are intentional.
  * - Non-RPS ties: every tied player wins, and a 2v2 tie is both teams win.
- * - A score of 0 is not a win (except Lumber Cut, where cutting nothing ties and everyone wins).
+ * - A score of 0 is not a win. Nobody acting means everyone drinks and nobody gets +3.
  * - RPS final tie or 0-0: both players lose. Battle Royale still scores only the first two ids.
  * - Hot Potato Battle Royale: everyone except the holder gets +3.
  * - Screen Painting timeout: the earliest selected player at the top coverage wins alone.
@@ -542,7 +543,7 @@ describe("Hot Potato", () => {
 });
 
 describe("Lumber Cut", () => {
-  it("MIN-013 nobody cut: everyone still wins", () => {
+  it("MIN-013 nobody cut: everyone loses", () => {
     for (const type of ["1v1", "BR", "2v2"] as const) {
       const players = type === "2v2"
         ? [
@@ -561,18 +562,17 @@ describe("Lumber Cut", () => {
       game.onInit(state);
       const ids = players.map((entry) => entry.id);
       finish(game, state, {
-        scores: Object.fromEntries(ids.map((id) => [id, score(3)])),
-        winners: ids,
-        losers: [],
-        tiedIds: ids,
-        ...(type === "1v1"
-          ? {
-              result: board("Lumber Cut Results", [
-                { playerId: "a", playerName: "Ada", scoreValue: 0, scoreLabel: "0% Cut", isWinner: true },
-                { playerId: "b", playerName: "Bea", scoreValue: 0, scoreLabel: "0% Cut", isWinner: true },
-              ]),
-            }
-          : {}),
+        scores: Object.fromEntries(ids.map((id) => [id, score(0, 1)])),
+        winners: [],
+        losers: ids,
+        tiedIds: [],
+        result: board("Lumber Cut Results", players.map((entry) => ({
+          playerId: entry.id,
+          playerName: entry.name,
+          scoreValue: 0,
+          scoreLabel: "0% Cut",
+          isWinner: false,
+        }))),
       });
     }
   });
@@ -622,6 +622,114 @@ describe("Lumber Cut", () => {
       winners: ["a", "b"],
       losers: ["c"],
       tiedIds: ["a", "b"],
+    });
+  });
+
+  it("2v2: the team that cut wins, and an equal cut above 0 is both teams", () => {
+    const ahead = makeState({
+      type: "2v2",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+        { id: "d", name: "Dee" },
+      ],
+    });
+    const aheadGame = new LumberCut();
+    aheadGame.onInit(ahead);
+    const aheadData = JSON.parse(player(ahead, "a").gameData);
+    aheadData.teams[0].pairs = 4;
+    aheadData.teams[1].pairs = 1;
+    player(ahead, "a").gameData = JSON.stringify(aheadData);
+    finish(aheadGame, ahead, {
+      scores: { a: score(3), b: score(3), c: score(0, 1), d: score(0, 1) },
+      winners: ["a", "b"],
+      losers: ["c", "d"],
+      tiedIds: [],
+    });
+
+    const tied = makeState({
+      type: "2v2",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+        { id: "d", name: "Dee" },
+      ],
+    });
+    const tiedGame = new LumberCut();
+    tiedGame.onInit(tied);
+    const tiedData = JSON.parse(player(tied, "a").gameData);
+    tiedData.teams[0].pairs = 2;
+    tiedData.teams[1].pairs = 2;
+    player(tied, "a").gameData = JSON.stringify(tiedData);
+    finish(tiedGame, tied, {
+      scores: { a: score(3), b: score(3), c: score(3), d: score(3) },
+      winners: ["a", "b", "c", "d"],
+      losers: [],
+      tiedIds: ["a", "b", "c", "d"],
+    });
+  });
+
+  it("a left-only pull leaves pairs at 0, so everyone loses", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+      ],
+    });
+    const game = new LumberCut();
+    game.onInit(state);
+    game.onMessage(client("a"), { action: "pull", side: "left" }, state);
+    finish(game, state, {
+      scores: { a: score(0, 1), b: score(0, 1) },
+      winners: [],
+      losers: ["a", "b"],
+      tiedIds: [],
+    });
+    const data = JSON.parse(player(state, "a").gameData);
+    assert.equal(data.teams[0].pairs, 0);
+    assert.equal(data.teams[1].pairs, 0);
+  });
+
+  it("pays no points, including Double Points, when nobody cut", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada", effects: JSON.stringify({ doublePoints: true }) },
+        { id: "b", name: "Bea", effects: JSON.stringify({ doublePoints: true }) },
+      ],
+    });
+    const game = new LumberCut();
+    game.onInit(state);
+    settle(game, state);
+    resolveRound(state);
+    assert.equal(player(state, "a").score, 0);
+    assert.equal(player(state, "b").score, 0);
+    assert.equal(player(state, "a").drinks, 1);
+    assert.equal(player(state, "b").drinks, 1);
+    assert.deepEqual(state.lastWinners.toArray(), []);
+    assert.deepEqual(state.lastLosers.toArray(), ["a", "b"]);
+    assert.equal(player(state, "a").activeEffects, "");
+    assert.equal(player(state, "b").activeEffects, "");
+  });
+
+  it("does not drink a disconnected player when nobody cut", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea", score: 4, drinks: 2, connected: false },
+      ],
+    });
+    const game = new LumberCut();
+    game.onInit(state);
+    finish(game, state, {
+      scores: { a: score(0, 1), b: { score: 4, drinks: 2 } },
+      winners: [],
+      losers: ["a"],
+      tiedIds: [],
     });
   });
 
@@ -1579,6 +1687,118 @@ describe("Double Points", () => {
   });
 });
 
+describe("No-action rule", () => {
+  it("drops a reported win when every action score is 0", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada", score: 5 },
+        { id: "b", name: "Bea", score: 5 },
+      ],
+    });
+    state.lastWinners.push("a", "b");
+    state.lastGameResult = JSON.stringify({
+      type: "leaderboard",
+      title: "Example",
+      leaderboard: [
+        { playerId: "a", playerName: "Ada", scoreValue: 0, scoreLabel: "0", isWinner: true },
+        { playerId: "b", playerName: "Bea", scoreValue: 0, scoreLabel: "0", isWinner: true },
+      ],
+      timeline: [
+        { playerId: "a", playerName: "Ada", scoreValue: 0, scoreLabel: "0", isWinner: true, events: [] },
+      ],
+    });
+    const result = scoreGameResult(state, {
+      winners: ["a", "b"],
+      losers: [],
+      tiedIds: ["a", "b"],
+      actionScores: { a: 0, b: 0 },
+    });
+    assert.deepEqual(result.winners, []);
+    assert.deepEqual(result.losers, ["a", "b"]);
+    assert.deepEqual(result.tiedIds, []);
+    assert.equal(player(state, "a").score, 5);
+    assert.equal(player(state, "b").score, 5);
+    assert.equal(player(state, "a").drinks, 1);
+    assert.equal(player(state, "b").drinks, 1);
+    assert.deepEqual(state.lastWinners.toArray(), []);
+    assert.deepEqual(state.lastLosers.toArray(), ["a", "b"]);
+    const parsed = JSON.parse(state.lastGameResult);
+    assert.equal(parsed.leaderboard[0].isWinner, false);
+    assert.equal(parsed.leaderboard[1].isWinner, false);
+    assert.equal(parsed.timeline[0].isWinner, false);
+  });
+
+  it("leaves a non-zero tie as a shared win", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+      ],
+    });
+    state.lastWinners.push("a", "b");
+    const result = scoreGameResult(state, {
+      winners: ["a", "b"],
+      losers: [],
+      tiedIds: ["a", "b"],
+      actionScores: { a: 4, b: 4 },
+    });
+    assert.deepEqual(result.winners, ["a", "b"]);
+    assert.deepEqual(result.losers, []);
+    assert.deepEqual(result.tiedIds, ["a", "b"]);
+    assert.equal(player(state, "a").score, 3);
+    assert.equal(player(state, "b").score, 3);
+    assert.equal(player(state, "a").drinks, 0);
+    assert.equal(player(state, "b").drinks, 0);
+    assert.deepEqual(state.lastWinners.toArray(), ["a", "b"]);
+  });
+
+  it("leaves a result alone when the game omits action scores", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+      ],
+    });
+    state.lastWinners.push("a");
+    state.lastLosers.push("b");
+    const result = scoreGameResult(state, {
+      winners: ["a"],
+      losers: ["b"],
+      tiedIds: [],
+    });
+    assert.deepEqual(result.winners, ["a"]);
+    assert.deepEqual(result.losers, ["b"]);
+    assert.equal(player(state, "a").score, 3);
+    assert.equal(player(state, "b").drinks, 1);
+    assert.equal(player(state, "b").score, 0);
+  });
+
+  it("leaves a result alone when a contestant is missing from the score report", () => {
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+      ],
+    });
+    state.lastWinners.push("a");
+    state.lastLosers.push("b");
+    const result = scoreGameResult(state, {
+      winners: ["a"],
+      losers: ["b"],
+      tiedIds: [],
+      actionScores: { a: 0 },
+    });
+    assert.deepEqual(result.winners, ["a"]);
+    assert.deepEqual(result.losers, ["b"]);
+    assert.equal(player(state, "a").score, 3);
+    assert.equal(player(state, "b").drinks, 1);
+  });
+});
+
 describe("LobbyRoom", () => {
   it("applies +3 per winner and one drink per loser from the game result", () => {
     const state = makeState({
@@ -1602,5 +1822,30 @@ describe("LobbyRoom", () => {
     assert.equal(player(state, "c").drinks, 1);
     assert.deepEqual(state.lastWinners.toArray(), ["a"]);
     assert.deepEqual(state.lastLosers.toArray(), ["b", "c"]);
+  });
+
+  it("MIN-013 nobody cut: pays drinks and no points", () => {
+    const state = makeState({
+      type: "2v2",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+        { id: "d", name: "Dee" },
+      ],
+    });
+    const room = new LobbyRoom();
+    room.setState(state);
+    const game = new LumberCut();
+    game.onInit(state);
+    room.activeGame = game;
+    room.applyActiveGameResult();
+
+    for (const id of ["a", "b", "c", "d"]) {
+      assert.equal(player(state, id).score, 0, id);
+      assert.equal(player(state, id).drinks, 1, id);
+    }
+    assert.deepEqual(state.lastWinners.toArray(), []);
+    assert.deepEqual(state.lastLosers.toArray(), ["a", "b", "c", "d"]);
   });
 });
