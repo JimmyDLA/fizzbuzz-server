@@ -106,7 +106,7 @@ export class LobbyRoom extends Room {
 
     this.onMessage(SET_ROUNDS_MESSAGE, (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      if (!player || !player.isHost) {
+      if (!this.isCurrentHost(player)) {
         client.send(LOBBY_ERROR_EVENT, notHostError());
         return;
       }
@@ -125,7 +125,7 @@ export class LobbyRoom extends Room {
     this.onMessage("dev_start_wheel", (client, message) => {
       if (!isDevToolsEnabled()) return;
       const player = this.state.players.get(client.sessionId);
-      if (player && player.isHost && this.state.phase === "chart" && !this.matchOver) {
+      if (player && this.isCurrentHost(player) && this.state.phase === "chart" && !this.matchOver) {
         const selectedPlayers = Array.isArray(message?.selectedPlayers) ? message.selectedPlayers : [];
         if (!this.forceWheelPhase(message?.type, message?.category, selectedPlayers)) {
           client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
@@ -136,7 +136,7 @@ export class LobbyRoom extends Room {
     this.onMessage("dev_award_card", (client, message) => {
       if (!isDevToolsEnabled()) return;
       const hostPlayer = this.state.players.get(client.sessionId);
-      if (!hostPlayer || !hostPlayer.isHost) return;
+      if (!this.isCurrentHost(hostPlayer)) return;
 
       const targetPlayerId = message.targetPlayerId || client.sessionId;
       const cardId = message.cardId;
@@ -382,12 +382,14 @@ export class LobbyRoom extends Room {
       console.log(`[Rejoin] ${player.name} rejoined from offline cache.`);
     }
 
-    // Resolve host status: if no host exists in the lobby, make this player host
+    // One host. A returning player keeps the role only when nobody else still holds it.
     let hostExists = false;
     this.state.players.forEach(p => {
       if (p.isHost) hostExists = true;
     });
-    if (!hostExists && this.state.players.size === 0) {
+    if (hostExists) {
+      player.isHost = false;
+    } else if (this.state.players.size === 0) {
       player.isHost = true;
     }
 
@@ -426,23 +428,44 @@ export class LobbyRoom extends Room {
     }
   }
 
+  /**
+   * The one player whose isHost flag is set. Host-only actions must use this,
+   * so a stale flag left on a former host cannot change the match.
+   */
+  private isCurrentHost(player: Player | undefined): boolean {
+    if (!player?.isHost) return false;
+    let hosts = 0;
+    this.state.players.forEach((candidate) => {
+      if (candidate.isHost) hosts += 1;
+    });
+    return hosts === 1;
+  }
+
+  /**
+   * Keep exactly one host among connected and grace players.
+   * Promotion is immediate when the current host drops. The previous host
+   * loses isHost, including while their reconnect grace seat is still held.
+   */
   private ensureConnectedHost() {
-    let hasConnectedHost = false;
-    this.state.players.forEach(p => {
-      if (p.isConnected && p.isHost) {
-        hasConnectedHost = true;
-      }
+    const connected: Player[] = [];
+    this.state.players.forEach((player) => {
+      if (player.isConnected) connected.push(player);
     });
 
-    if (!hasConnectedHost) {
-      for (const [, p] of this.state.players.entries()) {
-        if (p.isConnected) {
-          p.isHost = true;
-          console.log(`[Host] Promoted ${p.name} to host.`);
-          break;
-        }
-      }
+    const connectedHost = connected.find((player) => player.isHost);
+    if (connectedHost) {
+      this.state.players.forEach((player) => {
+        if (player !== connectedHost) player.isHost = false;
+      });
+      return;
     }
+
+    const promoted = connected[0];
+    if (!promoted) return;
+    this.state.players.forEach((player) => {
+      player.isHost = player === promoted;
+    });
+    console.log(`[Host] Promoted ${promoted.name} to host.`);
   }
 
   /**
@@ -618,7 +641,6 @@ export class LobbyRoom extends Room {
   }
 
   private removePlayer(sessionId: string) {
-    const wasHost = this.state.players.get(sessionId)?.isHost;
     this.state.players.delete(sessionId);
 
     const idx = this.state.selectedPlayers.indexOf(sessionId);
@@ -626,7 +648,7 @@ export class LobbyRoom extends Room {
       this.state.selectedPlayers.splice(idx, 1);
     }
 
-    if (wasHost && this.state.players.size > 0) {
+    if (this.state.players.size > 0) {
       this.ensureConnectedHost();
     }
     this.syncReadyCounts();

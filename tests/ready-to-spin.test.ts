@@ -514,6 +514,63 @@ describe("ready to spin", { concurrency: 1 }, () => {
     }
   });
 
+  it("dev tools run only for the single current host", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousFlag = process.env[DEV_TOOLS_ENV];
+    process.env.NODE_ENV = "test";
+    process.env[DEV_TOOLS_ENV] = "1";
+    const { room, broadcasts, clients } = chartRoom(["ada", "bea", "cal"]);
+    const ada = room.state.players.get("ada");
+    const bea = room.state.players.get("bea");
+    assert.ok(ada && bea);
+    let pending: Promise<unknown> | undefined;
+    try {
+      bea.isHost = true;
+      emit(room, "dev_award_card", clients[0], { cardId: "WILD CARD" });
+      emit(room, "dev_start_wheel", clients[0], {
+        type: "1v1",
+        category: "Trivia",
+        selectedPlayers: ["ada", "bea"],
+      });
+      assert.equal(ada.cards.length, 0);
+      assert.equal(room.state.phase, "chart");
+      assert.equal(spinEvents(broadcasts).length, 0);
+
+      bea.isHost = false;
+      emit(room, "dev_award_card", clients[1], { cardId: "SHIELD" });
+      emit(room, "dev_start_wheel", clients[1], {
+        type: "1v1",
+        category: "Trivia",
+        selectedPlayers: ["ada", "bea"],
+      });
+      assert.equal(bea.cards.length, 0);
+      assert.equal(room.state.phase, "chart");
+
+      emit(room, "dev_award_card", clients[0], { cardId: "WILD CARD" });
+      assert.equal(ada.cards.length, 1);
+
+      pending = beginGrace(room, clients[0]);
+      assert.equal(ada.isHost, false);
+      assert.equal(bea.isHost, true);
+      emit(room, "dev_award_card", clients[0], { cardId: "SHIELD" });
+      assert.equal(ada.cards.length, 1);
+      emit(room, "dev_start_wheel", clients[1], {
+        type: "1v1",
+        category: "Trivia",
+        selectedPlayers: ["bea", "cal"],
+      });
+      assert.equal(room.state.phase, "wheel");
+      assert.equal(room.state.currentCategory, "Trivia");
+      assert.equal(spinEvents(broadcasts).length, 1);
+    } finally {
+      if (pending) await finishGrace(room, clients[0], pending, true);
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousFlag === undefined) delete process.env[DEV_TOOLS_ENV];
+      else process.env[DEV_TOOLS_ENV] = previousFlag;
+    }
+  });
+
   it("allows host dev_start_wheel only when the dev flag is on", () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousFlag = process.env[DEV_TOOLS_ENV];

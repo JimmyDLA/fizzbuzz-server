@@ -203,18 +203,29 @@ function beginGrace(room: LobbyRoom, client: FakeClient): Promise<unknown> {
   return room.onLeave(client as unknown as Client, 1006);
 }
 
-async function finishGrace(room: LobbyRoom, client: FakeClient, pending: Promise<unknown>): Promise<void> {
+async function finishGrace(
+  room: LobbyRoom,
+  client: FakeClient,
+  pending: Promise<unknown>,
+  reconnect = false,
+): Promise<void> {
   const token = (client as FakeClient & { reconnectionToken?: string }).reconnectionToken ?? "";
   const internal = room as unknown as {
-    _reconnections: Record<string, [string, { reject: (value: unknown) => void }]>;
+    _reconnections: Record<string, [string, { resolve: (value: unknown) => void; reject: (value: unknown) => void }]>;
     _reservedSeatTimeouts?: Record<string, ReturnType<typeof setTimeout>>;
+    _autoDisposeTimeout?: ReturnType<typeof setTimeout>;
   };
   const timer = internal._reservedSeatTimeouts?.[client.sessionId];
   if (timer) clearTimeout(timer);
   const entry = internal._reconnections[token];
   assert.ok(entry, "grace reservation was not armed");
-  entry[1].reject(false);
+  if (reconnect) {
+    entry[1].resolve({ sessionId: client.sessionId, reconnectionToken: token });
+  } else {
+    entry[1].reject(false);
+  }
   await pending;
+  if (internal._autoDisposeTimeout) clearTimeout(internal._autoDisposeTimeout);
 }
 
 function useManualTimers() {
@@ -304,6 +315,44 @@ describe("match length", { concurrency: 1 }, () => {
     assert.equal(room.state.totalRounds, 30);
     setRounds(room, guest, 50);
     assert.equal(room.state.totalRounds, 30);
+    assert.deepEqual(lobbyError(guest), notHostError());
+  });
+
+  it("rejects set_rounds from a former host after they reconnect", async () => {
+    const { room, clients } = seat(["ada", "bea"]);
+    const former = clients[0];
+    const guest = clients[1];
+    assert.equal(room.state.players.get("ada")?.isHost, true);
+    assert.equal(room.state.players.get("bea")?.isHost, false);
+
+    const pending = beginGrace(room, former);
+    assert.equal(room.state.players.get("ada")?.isConnected, false);
+    assert.equal(room.state.players.get("ada")?.isHost, false);
+    assert.equal(room.state.players.get("bea")?.isHost, true);
+    assert.equal(room.state.phase, "lobby");
+
+    await finishGrace(room, former, pending, true);
+
+    assert.equal(room.state.players.get("ada")?.isConnected, true);
+    assert.equal(room.state.players.get("ada")?.isHost, false);
+    assert.equal(room.state.players.get("bea")?.isHost, true);
+    assert.equal(room.state.phase, "lobby");
+
+    setRounds(room, former, 20);
+    assert.equal(room.state.totalRounds, 10);
+    assert.deepEqual(lobbyError(former), notHostError());
+
+    setRounds(room, guest, 30);
+    assert.equal(room.state.totalRounds, 30);
+    assert.equal(lobbyError(guest), undefined);
+
+    const ada = room.state.players.get("ada");
+    assert.ok(ada);
+    ada.isHost = true;
+    setRounds(room, former, 40);
+    setRounds(room, guest, 50);
+    assert.equal(room.state.totalRounds, 30);
+    assert.deepEqual(lobbyError(former), notHostError());
     assert.deepEqual(lobbyError(guest), notHostError());
   });
 
