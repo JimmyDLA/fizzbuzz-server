@@ -1,5 +1,5 @@
 import { Room, Client, ServerError } from "@colyseus/core";
-import { LobbyState, Player } from "./schema/LobbyState";
+import { LobbyState, Player, PodiumEntry } from "./schema/LobbyState";
 import { IMiniGame } from "../games/IMiniGame";
 import { TappingRace } from "../games/TappingRace";
 import { MathProblem } from "../games/MathProblem";
@@ -15,7 +15,16 @@ import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
 import { applyDoublePoints, applyStandardScoring } from "./scoring";
 import { MAX_ROOM_PLAYERS, connectedPlayerIds, hasEnoughConnectedPlayers } from "./connectedPlayers";
-import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "./lobbyErrors";
+import { LOBBY_ERROR_EVENT, invalidRoundsError, notEnoughPlayersError, notHostError, roundsLockedError } from "./lobbyErrors";
+import {
+  GAME_OVER_EVENT,
+  GameOverPayload,
+  RankedPlayer,
+  SET_ROUNDS_MESSAGE,
+  buildPodium,
+  isRoundChoice,
+  upcomingRoundNumber,
+} from "./matchLength";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
@@ -29,6 +38,12 @@ export class LobbyRoom extends Room {
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
   private isCardLocked: boolean = false;
   private shieldChainCount: number = 0;
+  /** True from the wheel start until the round resolves or aborts. */
+  private roundInProgress: boolean = false;
+  /** Rounds that have finished resolution, including card effects and drinks. */
+  private resolvedRounds: number = 0;
+  /** Set once the podium is sent and the room is closing. */
+  private matchOver: boolean = false;
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -55,6 +70,7 @@ export class LobbyRoom extends Room {
     this.setState(new LobbyState());
 
     this.onMessage("ready", (client, message) => {
+      if (this.matchOver) return;
       const player = this.state.players.get(client.sessionId);
       const canReady = !!player && (
         this.state.phase === "lobby" ||
@@ -76,9 +92,27 @@ export class LobbyRoom extends Room {
     // connected player is ready during chart. Ignore leftover clients.
     this.onMessage("start_wheel", () => {});
 
+    this.onMessage(SET_ROUNDS_MESSAGE, (client, message) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || !player.isHost) {
+        client.send(LOBBY_ERROR_EVENT, notHostError());
+        return;
+      }
+      if (this.state.phase !== "lobby") {
+        client.send(LOBBY_ERROR_EVENT, roundsLockedError());
+        return;
+      }
+      const rounds = message?.rounds;
+      if (!isRoundChoice(rounds)) {
+        client.send(LOBBY_ERROR_EVENT, invalidRoundsError());
+        return;
+      }
+      this.state.totalRounds = rounds;
+    });
+
     this.onMessage("dev_start_wheel", (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      if (player && player.isHost && this.state.phase === "chart") {
+      if (player && player.isHost && this.state.phase === "chart" && !this.matchOver) {
         const selectedPlayers = Array.isArray(message?.selectedPlayers) ? message.selectedPlayers : [];
         if (!this.forceWheelPhase(message?.type, message?.category, selectedPlayers)) {
           client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
@@ -369,6 +403,16 @@ export class LobbyRoom extends Room {
     this.state.lastWinners.clear();
     this.state.lastLosers.clear();
     this.state.lastGameResult = "";
+    // The round did not resolve. The chart shows the same number so it can be replayed.
+    this.roundInProgress = false;
+    this.showUpcomingRound();
+  }
+
+  onDispose() {
+    if (this.gameLoopInterval) {
+      clearInterval(this.gameLoopInterval);
+      this.gameLoopInterval = null;
+    }
   }
 
   private ensureConnectedHost() {
@@ -391,6 +435,7 @@ export class LobbyRoom extends Room {
   }
 
   async onLeave(client: Client, consented?: any) {
+    if (this.matchOver) return;
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
@@ -573,6 +618,7 @@ export class LobbyRoom extends Room {
 
   checkAllReady() {
     this.syncReadyCounts();
+    if (this.matchOver) return;
     if (this.clients.length < 1) return;
     let allReady = true;
 
@@ -607,8 +653,11 @@ export class LobbyRoom extends Room {
         }
         this.clearReadyFlags();
         this.state.phase = "chart";
+        this.showUpcomingRound();
       } else if (this.state.phase === "chart") {
         // No timer and no host override. A card play in flight keeps the Wild Card window.
+        // The round number advances in beginRound(), which the wheel calls once.
+        // Betting (every 5th round, including a final multiple of 5) hooks there.
         if (this.isCardLocked || !hasEnoughConnectedPlayers(this.state.players)) {
           return;
         }
@@ -618,13 +667,101 @@ export class LobbyRoom extends Room {
         this.clearReadyFlags();
         this.startCountdownPhase();
       } else if (this.state.phase === "resolution") {
-        this.clearReadyFlags();
-        this.state.phase = "chart";
+        // Shields have had the resolution window. Drinks and double points
+        // are already applied. The match ends only when this was the last round.
+        this.completeRound();
       }
     }
   }
 
+  /**
+   * Mark the displayed round as started. The chart already shows this number,
+   * so a spin, respin, or wild-card replacement does not advance it again.
+   * This is the only start-of-round hook. Betting reads `state.roundCount`
+   * (a positive multiple of 5, including when that round is the last one)
+   * before the wheel result is committed.
+   */
+  private beginRound(): void {
+    if (this.matchOver || this.roundInProgress) return;
+    this.roundInProgress = true;
+    if (this.state.roundCount < upcomingRoundNumber(this.resolvedRounds)) {
+      this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
+    }
+  }
+
+  /** Point the chart at the round that will be played next. */
+  private showUpcomingRound(): void {
+    if (this.matchOver) return;
+    if (this.resolvedRounds >= this.state.totalRounds) return;
+    this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
+  }
+
+  /**
+   * A round has finished resolution. Card effects and drinks for this round
+   * have already been applied. The next chart shows the following round.
+   * The final round broadcasts the podium and closes the room instead.
+   */
+  private completeRound(): void {
+    if (this.matchOver) return;
+    if (this.state.roundCount < upcomingRoundNumber(this.resolvedRounds)) {
+      this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
+    }
+    this.roundInProgress = false;
+    this.resolvedRounds = this.state.roundCount;
+    this.clearReadyFlags();
+    if (this.resolvedRounds >= this.state.totalRounds) {
+      this.endMatch();
+      return;
+    }
+    this.showUpcomingRound();
+    this.state.phase = "chart";
+  }
+
+  private fillPodium(): GameOverPayload {
+    const ranked: RankedPlayer[] = [];
+    this.state.players.forEach((player, id) => {
+      ranked.push({ id, name: player.name, score: player.score });
+    });
+    const seats = buildPodium(ranked);
+    this.state.podium.clear();
+    for (const seat of seats) {
+      const entry = new PodiumEntry();
+      entry.place = seat.place;
+      entry.playerId = seat.playerId;
+      entry.name = seat.name;
+      entry.score = seat.score;
+      this.state.podium.push(entry);
+    }
+    return {
+      roundCount: this.state.roundCount,
+      totalRounds: this.state.totalRounds,
+      podium: seats,
+    };
+  }
+
+  /**
+   * Broadcast the podium, then dispose the room so its code is freed.
+   * The broadcast is sent first so clients can show the podium and the
+   * Game over exit as the socket closes.
+   */
+  private endMatch(): void {
+    if (this.matchOver) return;
+    this.matchOver = true;
+    this.roundInProgress = false;
+    if (this.gameLoopInterval) {
+      clearInterval(this.gameLoopInterval);
+      this.gameLoopInterval = null;
+    }
+    this.activeGame = null;
+    this.isCardLocked = false;
+    const payload = this.fillPodium();
+    this.state.phase = "gameover";
+    this.broadcast(GAME_OVER_EVENT, payload);
+    void this.disconnect();
+  }
+
   startWheelPhase(): boolean {
+    if (this.matchOver) return false;
     const contestantIds = connectedPlayerIds(this.state.players);
     if (!hasEnoughConnectedPlayers(this.state.players)) {
       return false;
@@ -662,6 +799,7 @@ export class LobbyRoom extends Room {
     this.shieldChainCount = 0;
     // Chart readiness must not carry into the post-wheel Ready to Play step.
     this.clearReadyFlags();
+    this.beginRound();
     this.state.phase = "wheel";
     this.state.currentGameType = gameType;
     this.state.currentCategory = category;
@@ -694,6 +832,7 @@ export class LobbyRoom extends Room {
   }
 
   forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]): boolean {
+    if (this.matchOver) return false;
     const contestantIds = connectedPlayerIds(this.state.players, selectedPlayerIds);
     if (!hasEnoughConnectedPlayers(this.state.players, contestantIds)) {
       return false;
@@ -703,6 +842,7 @@ export class LobbyRoom extends Room {
     this.shieldChainCount = 0;
     // A Wild Card or dev spin also opens a fresh Ready to Play step.
     this.clearReadyFlags();
+    this.beginRound();
     this.state.phase = "wheel";
     this.state.currentGameType = type;
     this.state.currentCategory = category;
@@ -850,7 +990,6 @@ export class LobbyRoom extends Room {
     this.isCardLocked = false;
     this.shieldChainCount = 0;
     this.state.phase = "resolution";
-    this.state.roundCount += 1;
 
     // Process DOUBLE POINTS effect for winners
     applyDoublePoints(this.state);
