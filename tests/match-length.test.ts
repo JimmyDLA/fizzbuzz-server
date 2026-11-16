@@ -144,8 +144,20 @@ function enterChart(room: LobbyRoom, clients: FakeClient[]): void {
   assert.equal(room.state.phase, "chart");
 }
 
+/** Drop an overflow card before a ready press. A pending discard blocks the phase change. */
+function discardPending(room: LobbyRoom, clients: FakeClient[]): void {
+  for (const client of clients) {
+    const player = room.state.players.get(client.sessionId);
+    if (!player?.pendingDiscard) continue;
+    while (player.pendingDiscard && player.cards.length > 2) {
+      emit(room, "discard_card", client, { cardIndex: player.cards.length - 1 });
+    }
+  }
+}
+
 function spin(room: LobbyRoom, clients: FakeClient[]): void {
   assert.equal(room.state.phase, "chart");
+  discardPending(room, clients);
   for (const client of clients) {
     const player = room.state.players.get(client.sessionId);
     if (player?.isConnected) ready(room, client);
@@ -156,6 +168,7 @@ function spin(room: LobbyRoom, clients: FakeClient[]): void {
 /** Contestants ready out of a resolution that has already started. */
 function readyOutOfResolution(room: LobbyRoom, clients: FakeClient[]): void {
   assert.equal(room.state.phase, "resolution");
+  discardPending(room, clients);
   const selected = room.state.selectedPlayers.toArray();
   for (const id of selected) {
     const player = room.state.players.get(id);

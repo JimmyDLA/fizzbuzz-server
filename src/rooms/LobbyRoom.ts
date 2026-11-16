@@ -462,6 +462,8 @@ export class LobbyRoom extends Room {
       clearInterval(this.gameLoopInterval);
       this.gameLoopInterval = null;
     }
+    for (const timer of this.pendingDiscardTimers.values()) timer.clear();
+    this.pendingDiscardTimers.clear();
   }
 
   /**
@@ -1179,10 +1181,5 @@ export class LobbyRoom extends Room {
     this.state.players.forEach(p => {
       p.activeEffects = "";
     });
-  }
-
-  onDispose() {
-    for (const timer of this.pendingDiscardTimers.values()) timer.clear();
-    this.pendingDiscardTimers.clear();
   }
 }
