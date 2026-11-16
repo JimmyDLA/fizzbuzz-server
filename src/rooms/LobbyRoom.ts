@@ -13,7 +13,8 @@ import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
-import { applyDoublePoints, scoreGameResult } from "./scoring";
+import { applyDoublePoints, applyStandardScoring, scoreGameResult } from "./scoring";
+import { specialtyCardDropPool, specialtyCardRarity } from "./specialtyCards";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
@@ -445,33 +446,15 @@ export class LobbyRoom extends Room {
 
     const totalPlayer = playerEntries.length;
     const totalSpecCards = Math.max(1, Math.floor(totalPlayer / 2));
-
-    const CARDS_ROSTER = [
-      { id: "RESPIN", rarity: 3 },
-      { id: "SHIELD", rarity: 3 },
-      { id: "TURBO", rarity: 2 },
-      { id: "DOUBLE POINTS", rarity: 2 },
-      { id: "WILD CARD", rarity: 1 },
-    ];
-
-    const generateWeightedCard = () => {
-      const pool = [
-        "RESPIN", "RESPIN", "RESPIN", "RESPIN",
-        "SHIELD", "SHIELD", "SHIELD", "SHIELD",
-        "TURBO", "TURBO",
-        "DOUBLE POINTS", "DOUBLE POINTS",
-        "WILD CARD"
-      ];
-      return pool[Math.floor(Math.random() * pool.length)];
-    };
-
-    const getRarity = (id: string) => CARDS_ROSTER.find(c => c.id === id)?.rarity ?? 3;
+    const pool = specialtyCardDropPool();
+    if (pool.length === 0) return;
 
     const generatedCards: string[] = [];
     for (let i = 0; i < totalSpecCards; i++) {
-      generatedCards.push(generateWeightedCard());
+      generatedCards.push(pool[Math.floor(Math.random() * pool.length)]);
     }
-    generatedCards.sort((a, b) => getRarity(a) - getRarity(b));
+    // Lowest rarity number is rarest, so the first card after this sort goes to last place.
+    generatedCards.sort((a, b) => specialtyCardRarity(a) - specialtyCardRarity(b));
 
     const rankedEntries = [...playerEntries].sort(([, a], [, b]) => {
       if (a.score !== b.score) return a.score - b.score;
