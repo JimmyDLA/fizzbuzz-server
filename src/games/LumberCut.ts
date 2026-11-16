@@ -128,9 +128,11 @@ export class LumberCut implements IMiniGame {
       });
       
       winners = [];
-      winningTeams.forEach(t => winners.push(...t.members));
-      // Equal progress, including nobody cutting (every team at 0), is a shared win.
-      if (winningTeams.length > 1) tiedIds = [...winners];
+      // Every team still at 0 pairs: nobody cut, so nobody wins.
+      if (maxPairs > 0) {
+        winningTeams.forEach(t => winners.push(...t.members));
+        if (winningTeams.length > 1) tiedIds = [...winners];
+      }
     }
 
     state.lastWinners.clear();

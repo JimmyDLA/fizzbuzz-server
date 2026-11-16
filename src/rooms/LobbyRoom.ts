@@ -13,7 +13,7 @@ import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
-import { applyDoublePoints, applyDrinks, applyNoActionRound, applyStandardScoring } from "./scoring";
+import { applyDoublePoints, applyDrinks, applyNoActionRound, scoreGameResult } from "./scoring";
 import {
   BETTING_PAYOUT_EVENT,
   BETTING_ROUND_EVENT,
@@ -40,6 +40,7 @@ import {
   isRoundChoice,
   upcomingRoundNumber,
 } from "./matchLength";
+import { specialtyCardDropPool, specialtyCardRarity } from "./specialtyCards";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
@@ -639,33 +640,15 @@ export class LobbyRoom extends Room {
 
     const totalPlayer = playerEntries.length;
     const totalSpecCards = Math.max(1, Math.floor(totalPlayer / 2));
-
-    const CARDS_ROSTER = [
-      { id: "RESPIN", rarity: 3 },
-      { id: "SHIELD", rarity: 3 },
-      { id: "TURBO", rarity: 2 },
-      { id: "DOUBLE POINTS", rarity: 2 },
-      { id: "WILD CARD", rarity: 1 },
-    ];
-
-    const generateWeightedCard = () => {
-      const pool = [
-        "RESPIN", "RESPIN", "RESPIN", "RESPIN",
-        "SHIELD", "SHIELD", "SHIELD", "SHIELD",
-        "TURBO", "TURBO",
-        "DOUBLE POINTS", "DOUBLE POINTS",
-        "WILD CARD"
-      ];
-      return pool[Math.floor(Math.random() * pool.length)];
-    };
-
-    const getRarity = (id: string) => CARDS_ROSTER.find(c => c.id === id)?.rarity ?? 3;
+    const pool = specialtyCardDropPool();
+    if (pool.length === 0) return;
 
     const generatedCards: string[] = [];
     for (let i = 0; i < totalSpecCards; i++) {
-      generatedCards.push(generateWeightedCard());
+      generatedCards.push(pool[Math.floor(Math.random() * pool.length)]);
     }
-    generatedCards.sort((a, b) => getRarity(a) - getRarity(b));
+    // Lowest rarity number is rarest, so the first card after this sort goes to last place.
+    generatedCards.sort((a, b) => specialtyCardRarity(a) - specialtyCardRarity(b));
 
     const rankedEntries = [...playerEntries].sort(([, a], [, b]) => {
       if (a.score !== b.score) return a.score - b.score;
@@ -1123,9 +1106,9 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * Games only report who won, who drinks, and who tied.
-   * A normal round applies +3 / +1 drink here, once, before resolution.
-   * A betting round pays the pot instead of +3. Drinks still apply.
+   * Games report who won, who drinks, and how much each contestant did.
+   * A non-betting round uses dev's no-action helper, then +3 / +1 drink.
+   * A betting round pays the pot instead of +3. Nobody acting refunds that pot.
    */
   applyActiveGameResult() {
     if (!this.activeGame) return;
@@ -1136,7 +1119,7 @@ export class LobbyRoom extends Room {
       this.settleBetting(result);
       return;
     }
-    applyStandardScoring(this.state, result);
+    scoreGameResult(this.state, result);
   }
 
   startResolutionPhase() {

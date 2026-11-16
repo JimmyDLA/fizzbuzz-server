@@ -205,11 +205,13 @@ export class SimonSays implements IMiniGame {
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
     let winners: string[] = gameData.winners || [];
 
-    // Fallback: if the game ended without winners being set, the remaining
-    // active players are the winners. A betting round still treats round 0
-    // (every gameScore is 0) as no action via actionScores.
+    // Room timer expired before winners were set. Players still in who have
+    // survived a round share the win. Round 0 (nobody has survived a round)
+    // drinks everyone. actionScores stay at 0 so a betting round refunds.
     if (winners.length === 0 && gameData.activePlayers && gameData.activePlayers.length > 0) {
-      winners = [...gameData.activePlayers];
+      const active: string[] = gameData.activePlayers;
+      const survivedARound = active.some((id: string) => (state.players.get(id)?.gameScore || 0) > 0);
+      if (survivedARound) winners = [...active];
     }
 
     const tiedIds = winners.length > 1 ? [...winners] : [];

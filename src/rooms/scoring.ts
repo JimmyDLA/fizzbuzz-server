@@ -56,8 +56,8 @@ export function applyNoActionRound(state: LobbyState, result: GameResult): GameR
  * The only +3 / +1 drink payout for a normal mini-game. Games report a GameResult
  * and must not write player.score or player.drinks.
  * A tie is not re-decided here: winners and losers already say who won and who drinks.
- * A betting round does not call this. It pays the pot instead of +3 and still
- * calls `applyDrinks`.
+ * A betting round does not call this. It pays the pot instead of +3.
+ * Rock Paper Scissors on a betting round still calls `applyDrinks`.
  */
 export function applyStandardScoring(state: LobbyState, result: GameResult): void {
   for (const id of result.winners) {
@@ -73,6 +73,13 @@ export function applyDrinks(state: LobbyState, result: GameResult): void {
     const player = state.players.get(id);
     if (player) player.drinks += 1;
   }
+}
+
+/** No-action rewrite, then the shared +3 / +1 drink payout. */
+export function scoreGameResult(state: LobbyState, result: GameResult): GameResult {
+  const resolved = applyNoActionRound(state, result);
+  applyStandardScoring(state, resolved);
+  return resolved;
 }
 
 /**

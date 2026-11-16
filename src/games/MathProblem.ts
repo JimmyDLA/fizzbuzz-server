@@ -311,24 +311,26 @@ export class MathProblem implements IMiniGame {
       .toArray()
       .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
 
-    // Answers only. A Turbo +1 by itself is not acting for a betting pot.
-    // The point is still added to gameScore so a non-betting round matches
-    // the existing +3 payout. Betting reads actionScores, captured here.
+    // Answers only. A Turbo +1 by itself is not acting.
     const answered: Record<string, number> = {};
     ids.forEach(id => {
       answered[id] = state.players.get(id)?.gameScore || 0;
     });
-    ids.forEach(id => {
-      const p = state.players.get(id);
-      if (p && p.activeEffects) {
-        try {
-          const fx = JSON.parse(p.activeEffects);
-          if (fx.turbo) {
-            p.gameScore += 1;
-          }
-        } catch (e) {}
-      }
-    });
+    const anyoneAnswered = ids.some(id => answered[id] > 0);
+
+    if (anyoneAnswered) {
+      ids.forEach(id => {
+        const p = state.players.get(id);
+        if (p && p.activeEffects) {
+          try {
+            const fx = JSON.parse(p.activeEffects);
+            if (fx.turbo) {
+              p.gameScore += 1;
+            }
+          } catch (e) {}
+        }
+      });
+    }
 
     if (state.currentGameType === "2v2" && ids.length === 4) {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);

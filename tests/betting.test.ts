@@ -825,8 +825,8 @@ describe("no-action betting refunds", () => {
 
       assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1 });
       assert.equal(room.state.players.get("ada")?.betRank, 1);
-      assert.equal(room.state.players.get("bea")?.betRank, 2);
-      assert.equal(room.state.players.get("ada")?.gameScore, 1);
+      assert.equal(room.state.players.get("bea")?.betRank, 1);
+      assert.equal(room.state.players.get("ada")?.gameScore, 0);
       assert.equal(room.state.players.get("bea")?.gameScore, 0);
     }
   });
@@ -955,7 +955,7 @@ describe("Battle Royale is forced", () => {
 });
 
 describe("grace, abort, and non-betting rounds", () => {
-  it("pays a non-betting Turbo-only Math round +3, the same as before betting", () => {
+  it("does not pay +3 for a non-betting Turbo point on a blank Math board", () => {
     const { room } = bootRoom();
     addPlayer(room, "ada", { score: 9, host: true });
     addPlayer(room, "bea", { score: 4 });
@@ -966,8 +966,9 @@ describe("grace, abort, and non-betting rounds", () => {
     room.state.players.get("ada")!.activeEffects = JSON.stringify({ turbo: true });
     room.activeGame = new MathProblem();
     room.applyActiveGameResult();
-    assert.equal(room.state.players.get("ada")?.gameScore, 1);
-    assert.equal(room.state.players.get("ada")?.score, 12);
+    assert.equal(room.state.players.get("ada")?.gameScore, 0);
+    assert.equal(room.state.players.get("ada")?.score, 9);
+    assert.equal(room.state.players.get("ada")?.drinks, 1);
     assert.equal(room.state.players.get("ada")?.betWager, 0);
     assert.equal(room.state.players.get("bea")?.score, 4);
     assert.equal(room.state.players.get("bea")?.drinks, 1);
