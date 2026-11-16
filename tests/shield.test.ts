@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { LobbyRoom } from "../src/rooms/LobbyRoom";
+import { CloseCode } from "@colyseus/core";
+import { LobbyRoom, SHIELD_DECISION_MS } from "../src/rooms/LobbyRoom";
 import { DrinkChain, LobbyState, Player } from "../src/rooms/schema/LobbyState";
 import { client } from "./helpers";
 
@@ -428,7 +429,7 @@ describe("Shield chains", () => {
     assert.equal(chain(state, "b").deflections, 1);
     assert.equal(chain(state, "b").drinksToPass, 2);
 
-    await room.onLeave(client("b"), true);
+    await room.onLeave(client("b"), CloseCode.CONSENTED);
 
     assert.equal(state.players.has("b"), false);
     assert.equal(state.drinkChains.has("b"), false);
@@ -466,7 +467,7 @@ describe("Shield chains", () => {
     });
     room.allowReconnection = (() => grace) as unknown as LobbyRoom["allowReconnection"];
 
-    const leaving = room.onLeave(client("b"), false);
+    const leaving = room.onLeave(client("b"), CloseCode.ABNORMAL_CLOSURE);
 
     assert.equal(state.players.has("b"), true);
     assert.equal(state.players.get("b")?.isConnected, false);
@@ -482,5 +483,72 @@ describe("Shield chains", () => {
     assert.equal(state.players.has("b"), false);
     assert.equal(state.drinkChains.has("b"), false);
     assert.equal(owed(state, "b"), 0);
+  });
+
+  it("CRD-017 holds resolution for a disconnected seated Shield target until the decision timer or an act", () => {
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    try {
+      const waiting = resolution(
+        [
+          { id: "a", name: "Ada", cards: ["SHIELD"] },
+          { id: "b", name: "Bea", cards: ["SHIELD"] },
+          { id: "c", name: "Cal" },
+        ],
+        ["a"],
+      );
+      pass(waiting.room, "a", "b");
+      const waitingSeat = waiting.state.selectedPlayers.indexOf("b");
+      if (waitingSeat !== -1) waiting.state.selectedPlayers.splice(waitingSeat, 1);
+      waiting.room.clients.push(client("a"));
+      const target = waiting.state.players.get("b")!;
+      target.isConnected = false;
+      waiting.state.players.get("a")!.isReady = true;
+      waiting.state.players.get("c")!.isReady = true;
+
+      waiting.room.checkAllReady();
+      assert.equal(waiting.state.phase, "resolution");
+      assert.ok(SHIELD_DECISION_MS < 120_000);
+
+      now += SHIELD_DECISION_MS - 1;
+      waiting.room.checkAllReady();
+      assert.equal(waiting.state.phase, "resolution");
+
+      now += 1;
+      waiting.room.checkAllReady();
+      assert.equal(waiting.state.phase, "chart");
+
+      now = realNow();
+      const early = resolution(
+        [
+          { id: "a", name: "Ada", cards: ["SHIELD"] },
+          { id: "b", name: "Bea", cards: ["SHIELD"] },
+          { id: "c", name: "Cal" },
+        ],
+        ["a"],
+      );
+      pass(early.room, "a", "b");
+      const earlySeat = early.state.selectedPlayers.indexOf("b");
+      if (earlySeat !== -1) early.state.selectedPlayers.splice(earlySeat, 1);
+      early.room.clients.push(client("c"));
+      const bea = early.state.players.get("b")!;
+      bea.isConnected = false;
+      early.state.players.get("a")!.isReady = true;
+      early.state.players.get("c")!.isReady = true;
+
+      early.room.checkAllReady();
+      assert.equal(early.state.phase, "resolution");
+
+      bea.isConnected = true;
+      early.room.checkAllReady();
+      assert.equal(early.state.phase, "resolution");
+
+      bea.isReady = true;
+      early.room.checkAllReady();
+      assert.equal(early.state.phase, "chart");
+    } finally {
+      Date.now = realNow;
+    }
   });
 });

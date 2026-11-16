@@ -1,4 +1,4 @@
-import { Room, Client, ServerError } from "@colyseus/core";
+import { CloseCode, Room, Client, ServerError } from "@colyseus/core";
 import { DrinkChain, LobbyState, Player } from "./schema/LobbyState";
 import { IMiniGame } from "../games/IMiniGame";
 import { TappingRace } from "../games/TappingRace";
@@ -28,6 +28,12 @@ export function shieldDrinksToPass(drinks: number, deflections: number): number 
   return deflections <= 0 ? drinks : drinks + 1;
 }
 
+/**
+ * How long resolution keeps waiting on a Shield target who is disconnected but still seated.
+ * This is the decision window, not the 120s reconnect grace. Jimmy can overrule the length (CRD-017).
+ */
+export const SHIELD_DECISION_MS = 15_000;
+
 export interface ShieldPassResult {
   /** Merged amount this deflection passed. Same value as CardUsedEvent.drinksToPass. */
   drinksToPass: number;
@@ -42,6 +48,9 @@ export class LobbyRoom extends Room {
   activeGame: IMiniGame | null = null;
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
   private isCardLocked: boolean = false;
+  /** Deadlines for disconnected seated Shield targets. Cleared when they act, the window ends, or the seat is removed. */
+  private shieldHold = new Map<string, { deadline: number; acted: boolean }>();
+  private shieldHoldTimer: ReturnType<typeof setTimeout> | null = null;
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -71,6 +80,9 @@ export class LobbyRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (player && (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution")) {
         player.isReady = message.isReady;
+        if (message?.isReady && player.isConnected) {
+          this.markShieldHoldActed(client.sessionId);
+        }
       }
       this.checkAllReady();
     });
@@ -357,6 +369,9 @@ export class LobbyRoom extends Room {
       message: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`
     });
 
+    this.markShieldHoldActed(sessionId);
+    this.checkAllReady();
+
     return {
       drinksToPass,
       holderId: targetPlayerId,
@@ -434,6 +449,7 @@ export class LobbyRoom extends Room {
     this.activeGame = null;
     this.isCardLocked = false;
     this.clearDrinkChains();
+    this.clearShieldHolds();
     this.state.phase = "chart";
     this.state.timer = 0;
     this.state.selectedPlayers.clear();
@@ -466,7 +482,7 @@ export class LobbyRoom extends Room {
     }
   }
 
-  async onLeave(client: Client, consented?: any) {
+  async onLeave(client: Client, code?: number) {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
@@ -504,7 +520,7 @@ export class LobbyRoom extends Room {
 
     this.ensureConnectedHost();
 
-    if (consented) {
+    if (code === CloseCode.CONSENTED) {
       console.log(client.sessionId, "consented leave.");
       // Save stats to cache
       this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
@@ -623,6 +639,8 @@ export class LobbyRoom extends Room {
     if (wasHost && this.state.players.size > 0) {
       this.ensureConnectedHost();
     }
+    this.shieldHold.delete(sessionId);
+    this.checkAllReady();
   }
 
   checkAllReady() {
@@ -641,6 +659,11 @@ export class LobbyRoom extends Room {
         }
       });
       if (connectedSelectedCount === 0) allReady = false;
+      // A Shield target who dropped but still has a seat (reconnect grace) keeps
+      // resolution open for the decision window. Ready from everyone else does not skip it.
+      if (this.state.phase === "resolution" && this.shieldHoldBlocksResolution()) {
+        allReady = false;
+      }
     } else {
       // Everyone connected must be ready
       let connectedCount = 0;
@@ -663,13 +686,87 @@ export class LobbyRoom extends Room {
       } else if (this.state.phase === "resolution") {
         this.state.players.forEach(p => p.isReady = false);
         this.state.phase = "chart";
+        this.clearShieldHolds();
       }
+    }
+  }
+
+  /**
+   * Current drink holders who still have a Shield and can deflect.
+   * A disconnected one who is still in `players` is seated (grace). Removing the seat ends the hold.
+   */
+  private currentShieldTargets(): string[] {
+    const ids: string[] = [];
+    this.state.drinkChains.forEach((chain) => {
+      const player = this.state.players.get(chain.holderId);
+      if (!player || chain.drinks <= 0) return;
+      if (player.cards.indexOf("SHIELD") === -1) return;
+      ids.push(chain.holderId);
+    });
+    return ids;
+  }
+
+  private shieldHoldBlocksResolution(): boolean {
+    const now = Date.now();
+    const targets = new Set(this.currentShieldTargets());
+    for (const id of [...this.shieldHold.keys()]) {
+      if (!this.state.players.has(id) || !targets.has(id)) this.shieldHold.delete(id);
+    }
+    for (const id of targets) {
+      const player = this.state.players.get(id);
+      if (!player || player.isConnected) continue;
+      if (!this.shieldHold.has(id)) {
+        this.shieldHold.set(id, { deadline: now + SHIELD_DECISION_MS, acted: false });
+      }
+    }
+
+    let blocking = false;
+    for (const [id, hold] of this.shieldHold) {
+      const player = this.state.players.get(id);
+      if (!player || !targets.has(id)) continue;
+      if (player.isConnected && player.isReady) hold.acted = true;
+      if (hold.acted || now >= hold.deadline) continue;
+      blocking = true;
+    }
+    if (blocking) this.armShieldHoldTimer();
+    else if (this.shieldHoldTimer) {
+      clearTimeout(this.shieldHoldTimer);
+      this.shieldHoldTimer = null;
+    }
+    return blocking;
+  }
+
+  private markShieldHoldActed(sessionId: string) {
+    const hold = this.shieldHold.get(sessionId);
+    if (hold) hold.acted = true;
+  }
+
+  private armShieldHoldTimer() {
+    let soonest = Infinity;
+    for (const hold of this.shieldHold.values()) {
+      if (!hold.acted && hold.deadline < soonest) soonest = hold.deadline;
+    }
+    if (!Number.isFinite(soonest)) return;
+    if (this.shieldHoldTimer) clearTimeout(this.shieldHoldTimer);
+    const delay = Math.max(0, soonest - Date.now());
+    this.shieldHoldTimer = setTimeout(() => {
+      this.shieldHoldTimer = null;
+      this.checkAllReady();
+    }, delay);
+  }
+
+  private clearShieldHolds() {
+    this.shieldHold.clear();
+    if (this.shieldHoldTimer) {
+      clearTimeout(this.shieldHoldTimer);
+      this.shieldHoldTimer = null;
     }
   }
 
   startWheelPhase() {
     this.isCardLocked = false;
     this.clearDrinkChains();
+    this.clearShieldHolds();
     this.state.phase = "wheel";
     this.state.currentGameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
     this.state.currentCategory = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
@@ -732,6 +829,7 @@ export class LobbyRoom extends Room {
   forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]) {
     this.isCardLocked = false;
     this.clearDrinkChains();
+    this.clearShieldHolds();
     this.state.phase = "wheel";
     this.state.currentGameType = type;
     this.state.currentCategory = category;
@@ -876,6 +974,7 @@ export class LobbyRoom extends Room {
 
   startResolutionPhase() {
     this.isCardLocked = false;
+    this.clearShieldHolds();
     this.state.phase = "resolution";
     this.state.roundCount += 1;
 
