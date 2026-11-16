@@ -46,6 +46,9 @@ export class LobbyRoom extends Room {
   private shieldChainCount: number = 0;
   /** Session ids inside the reconnect grace window. They hold a seat until they return or the window ends. */
   private graceSessionIds = new Set<string>();
+  /** Original join order. A grace reconnect keeps the same number, so host selection stays stable. */
+  private nextJoinOrder = 0;
+  private joinOrder = new Map<string, number>();
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -324,16 +327,16 @@ export class LobbyRoom extends Room {
     });
 
     if (existingPlayerId) {
-      // Inherit state from the disconnected session
+      // Inherit state from the disconnected session. Host is chosen afterwards,
+      // so a stale isHost flag cannot follow the player onto a new session.
       const oldPlayer = this.state.players.get(existingPlayerId);
       if (oldPlayer) {
         player.score = oldPlayer.score;
         player.drinks = oldPlayer.drinks;
-        player.isHost = oldPlayer.isHost;
         player.cards.push(...oldPlayer.cards);
         player.activeEffects = oldPlayer.activeEffects;
       }
-      // Remove the old player object
+      this.keepJoinOrder(client.sessionId, existingPlayerId);
       this.state.players.delete(existingPlayerId);
       console.log(`[Rejoin] ${player.name} rejoined from active disconnected session.`);
     } else if (this.disconnectedPlayersCache.has(nameLower)) {
@@ -353,20 +356,32 @@ export class LobbyRoom extends Room {
       console.log(`[Rejoin] ${player.name} rejoined from offline cache.`);
     }
 
-    // One host. A returning player keeps the role only when nobody else still holds it.
-    let hostExists = false;
-    this.state.players.forEach(p => {
-      if (p.isHost) hostExists = true;
-    });
-    if (hostExists) {
-      player.isHost = false;
-    } else if (this.state.players.size === 0) {
-      player.isHost = true;
-    }
-
+    this.keepJoinOrder(client.sessionId);
     this.state.players.set(client.sessionId, player);
+    this.ensureConnectedHost();
     // A joiner is not ready. Re-check so they cannot inherit an all-ready spin.
     this.checkAllReady();
+  }
+
+  /** Original join position. Unchanged when a grace player reconnects with the same session. */
+  joinSequence(sessionId: string): number {
+    const order = this.joinOrder.get(sessionId);
+    if (order === undefined) throw new Error(`no join sequence for ${sessionId}`);
+    return order;
+  }
+
+  private keepJoinOrder(sessionId: string, inheritedFrom?: string) {
+    if (inheritedFrom) {
+      const inherited = this.joinOrder.get(inheritedFrom);
+      this.joinOrder.delete(inheritedFrom);
+      if (inherited !== undefined) {
+        this.joinOrder.set(sessionId, inherited);
+        return;
+      }
+    }
+    if (!this.joinOrder.has(sessionId)) {
+      this.joinOrder.set(sessionId, this.nextJoinOrder++);
+    }
   }
 
   private abortGameToChart(reason: string) {
@@ -393,43 +408,42 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * The one player whose isHost flag is set. Host-only actions must use this,
-   * so a stale flag left on a former host cannot spin the wheel.
+   * Host-only actions must use this. True only for the single connected host,
+   * so an offline flag cannot spin the wheel.
    */
   private isCurrentHost(player: Player | undefined): boolean {
-    if (!player?.isHost) return false;
-    let hosts = 0;
+    if (!player?.isHost || !player.isConnected) return false;
+    let connectedHosts = 0;
     this.state.players.forEach((candidate) => {
-      if (candidate.isHost) hosts += 1;
+      if (candidate.isConnected && candidate.isHost) connectedHosts += 1;
     });
-    return hosts === 1;
+    return connectedHosts === 1;
   }
 
   /**
-   * Keep exactly one host among connected and grace players.
-   * Promotion is immediate when the current host drops. The previous host
-   * loses isHost, including while their reconnect grace seat is still held.
+   * Whenever at least one player is connected, exactly one connected player is host.
+   * An offline host is cleared as soon as someone connected can take the role.
+   * A new host is the earliest-joined connected player. An existing connected host
+   * is left in place, so a later reconnect does not steal the role.
    */
   private ensureConnectedHost() {
-    const connected: Player[] = [];
-    this.state.players.forEach((player) => {
-      if (player.isConnected) connected.push(player);
+    const connected: Array<{ player: Player; order: number }> = [];
+    this.state.players.forEach((player, sessionId) => {
+      if (!player.isConnected) return;
+      connected.push({ player, order: this.joinOrder.get(sessionId) ?? Number.MAX_SAFE_INTEGER });
     });
+    if (connected.length === 0) return;
 
-    const connectedHost = connected.find((player) => player.isHost);
-    if (connectedHost) {
-      this.state.players.forEach((player) => {
-        if (player !== connectedHost) player.isHost = false;
-      });
-      return;
+    const connectedHosts = connected.filter((entry) => entry.player.isHost);
+    let host = connectedHosts.length === 1 ? connectedHosts[0].player : undefined;
+    if (!host) {
+      connected.sort((a, b) => a.order - b.order);
+      host = connected[0].player;
+      console.log(`[Host] Promoted ${host.name} to host.`);
     }
-
-    const promoted = connected[0];
-    if (!promoted) return;
     this.state.players.forEach((player) => {
-      player.isHost = player === promoted;
+      player.isHost = player === host;
     });
-    console.log(`[Host] Promoted ${promoted.name} to host.`);
   }
 
   /**
@@ -510,6 +524,7 @@ export class LobbyRoom extends Room {
         await this.allowReconnection(client, RECONNECT_GRACE_SECONDS);
         console.log(client.sessionId, "successfully reconnected!");
         player.isConnected = true;
+        this.ensureConnectedHost();
         this.checkAllReady();
       } catch (e) {
         console.log(client.sessionId, "grace period expired!");
@@ -604,6 +619,7 @@ export class LobbyRoom extends Room {
   }
 
   private removePlayer(sessionId: string) {
+    this.joinOrder.delete(sessionId);
     this.state.players.delete(sessionId);
 
     const idx = this.state.selectedPlayers.indexOf(sessionId);
