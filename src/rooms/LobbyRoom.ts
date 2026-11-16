@@ -23,7 +23,6 @@ import {
   SET_ROUNDS_MESSAGE,
   buildPodium,
   isRoundChoice,
-  upcomingRoundNumber,
 } from "./matchLength";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
@@ -53,11 +52,7 @@ export class LobbyRoom extends Room {
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
   private isCardLocked: boolean = false;
   private shieldChainCount: number = 0;
-  /** True from the wheel start until the round resolves or aborts. */
-  private roundInProgress: boolean = false;
-  /** Rounds that have finished resolution, including card effects and drinks. */
-  private resolvedRounds: number = 0;
-  /** Set once the podium is sent and the room is closing. */
+  /** Set once the podium is in room state and the room is closing. */
   private matchOver: boolean = false;
   /** Session ids inside the reconnect grace window. They hold a seat until they return or the window ends. */
   private graceSessionIds = new Set<string>();
@@ -422,9 +417,6 @@ export class LobbyRoom extends Room {
     this.state.lastWinners.clear();
     this.state.lastLosers.clear();
     this.state.lastGameResult = "";
-    // The round did not resolve. The chart shows the same number so it can be replayed.
-    this.roundInProgress = false;
-    this.showUpcomingRound();
   }
 
   onDispose() {
@@ -697,11 +689,10 @@ export class LobbyRoom extends Room {
         }
         this.clearReadyFlags();
         this.state.phase = "chart";
-        this.showUpcomingRound();
       } else if (this.state.phase === "chart") {
         // No timer and no host override. A card play in flight keeps the Wild Card window.
-        // The round number advances in beginRound(), which the wheel calls once.
-        // Betting (every 5th round, including a final multiple of 5) hooks there.
+        // roundCount does not change here. The round this spin plays is roundCount + 1.
+        // Betting (every 5th round, including a final multiple of 5) hooks that value.
         if (this.isCardLocked || !hasEnoughConnectedPlayers(this.state.players)) {
           return;
         }
@@ -719,45 +710,18 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * Mark the displayed round as started. The chart already shows this number,
-   * so a spin, respin, or wild-card replacement does not advance it again.
-   * This is the only start-of-round hook. Betting reads `state.roundCount`
-   * (a positive multiple of 5, including when that round is the last one)
-   * before the wheel result is committed.
-   */
-  private beginRound(): void {
-    if (this.matchOver || this.roundInProgress) return;
-    this.roundInProgress = true;
-    if (this.state.roundCount < upcomingRoundNumber(this.resolvedRounds)) {
-      this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
-    }
-  }
-
-  /** Point the chart at the round that will be played next. */
-  private showUpcomingRound(): void {
-    if (this.matchOver) return;
-    if (this.resolvedRounds >= this.state.totalRounds) return;
-    this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
-  }
-
-  /**
-   * A round has finished resolution. Card effects and drinks for this round
-   * have already been applied. The next chart shows the following round.
-   * The final round broadcasts the podium and closes the room instead.
+   * Resolution is finished, including Shield. `roundCount` was already
+   * incremented when this resolution started. The final round fills the
+   * podium and closes. Any earlier round returns to the chart with the
+   * same `roundCount`.
    */
   private completeRound(): void {
     if (this.matchOver) return;
-    if (this.state.roundCount < upcomingRoundNumber(this.resolvedRounds)) {
-      this.state.roundCount = upcomingRoundNumber(this.resolvedRounds);
-    }
-    this.roundInProgress = false;
-    this.resolvedRounds = this.state.roundCount;
     this.clearReadyFlags();
-    if (this.resolvedRounds >= this.state.totalRounds) {
+    if (this.state.roundCount >= this.state.totalRounds) {
       this.endMatch();
       return;
     }
-    this.showUpcomingRound();
     this.state.phase = "chart";
   }
 
@@ -787,14 +751,12 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * Broadcast the podium, then dispose the room so its code is freed.
-   * The broadcast is sent first so clients can show the podium and the
-   * Game over exit as the socket closes.
+   * Put gameover and the podium into room state, push that patch, then the
+   * GameOverEvent, then dispose the room so its code is freed.
    */
   private endMatch(): void {
     if (this.matchOver) return;
     this.matchOver = true;
-    this.roundInProgress = false;
     if (this.gameLoopInterval) {
       clearInterval(this.gameLoopInterval);
       this.gameLoopInterval = null;
@@ -803,6 +765,7 @@ export class LobbyRoom extends Room {
     this.isCardLocked = false;
     const payload = this.fillPodium();
     this.state.phase = "gameover";
+    this.broadcastPatch();
     this.broadcast(GAME_OVER_EVENT, payload);
     void this.disconnect();
   }
@@ -846,7 +809,6 @@ export class LobbyRoom extends Room {
     this.shieldChainCount = 0;
     // Chart readiness must not carry into the post-wheel Ready to Play step.
     this.clearReadyFlags();
-    this.beginRound();
     this.state.phase = "wheel";
     this.state.currentGameType = gameType;
     this.state.currentCategory = category;
@@ -889,7 +851,6 @@ export class LobbyRoom extends Room {
     this.shieldChainCount = 0;
     // A Wild Card or dev spin also opens a fresh Ready to Play step.
     this.clearReadyFlags();
-    this.beginRound();
     this.state.phase = "wheel";
     this.state.currentGameType = type;
     this.state.currentCategory = category;
@@ -1037,6 +998,9 @@ export class LobbyRoom extends Room {
     this.isCardLocked = false;
     this.shieldChainCount = 0;
     this.state.phase = "resolution";
+    // One increment, here only. Master and the earned-round lock both read
+    // this as "resolution N has started" before cards are dealt.
+    this.state.roundCount += 1;
 
     // Process DOUBLE POINTS effect for winners
     applyDoublePoints(this.state);

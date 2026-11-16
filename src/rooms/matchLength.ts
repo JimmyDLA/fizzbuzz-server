@@ -1,11 +1,11 @@
 /**
  * Match length and the end-of-match podium.
  *
- * The round index the chart is showing is the only start-of-round hook.
- * A later betting ticket (every 5th round, including a final round when the
- * length is a multiple of 5) can branch on `upcomingRoundNumber` before the
- * wheel starts. A no-action betting round refunds wagers there. This module
- * does not run betting.
+ * `roundCount` advances only when resolution starts. `upcomingRoundNumber`
+ * is the 1-based round a chart spin will play (`roundCount + 1`). A later
+ * betting ticket (every 5th round, including a final multiple of 5) branches
+ * on that value before the wheel. A no-action betting round refunds wagers
+ * there. This module does not run betting.
  */
 
 export const ROUND_CHOICES = [10, 15, 20, 30, 40, 50] as const;
@@ -22,11 +22,14 @@ export function isRoundChoice(value: unknown): value is RoundChoice {
 }
 
 /**
- * 1-based index of the round that has not resolved yet.
- * The chart shows this number. Starting the wheel does not advance it again.
+ * 1-based round the next chart spin will play.
+ * `roundCount` is the number of resolutions that have started, so during
+ * chart, wheel, countdown, and playing the round on screen is `roundCount + 1`.
+ * Betting (every 5th round, including a final multiple of 5) reads this value
+ * before the wheel. It does not change `roundCount`.
  */
-export function upcomingRoundNumber(resolvedRounds: number): number {
-  return resolvedRounds + 1;
+export function upcomingRoundNumber(roundCount: number): number {
+  return roundCount + 1;
 }
 
 export interface RankedPlayer {
