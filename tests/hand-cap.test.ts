@@ -215,7 +215,7 @@ describe("actions while over the cap", () => {
     assert.equal(room.state.phase, "lobby");
   });
 
-  it("clears ready when the third card arrives and blocks a ready flip", () => {
+  it("stores a ready press while a discard is pending and does not advance yet", () => {
     const room = setup();
     const { player } = addPlayer(room, "ada", "Ada", true);
     award(room, "ada", "SHIELD");
@@ -224,10 +224,62 @@ describe("actions while over the cap", () => {
     room.state.phase = "lobby";
 
     award(room, "ada", "TURBO");
+    assert.equal(player.isReady, false);
     emit(room, "ready", "ada", { isReady: true });
 
-    assert.equal(player.isReady, false);
+    assert.equal(player.isReady, true);
     assert.equal(room.state.phase, "lobby");
+  });
+});
+
+describe("resolution continues after the extra card is gone", () => {
+  function resolution(cardIds: [string, string, string] = ["A", "B", "C"]) {
+    const setupRoom = overflow(cardIds);
+    const bea = addPlayer(setupRoom.room, "bea", "Bea");
+    setupRoom.room.state.phase = "resolution";
+    setupRoom.room.state.selectedPlayers.push("ada", "bea");
+    bea.player.isReady = true;
+    return { ...setupRoom, bea: bea.player };
+  }
+
+  it("stores ready during a pending discard, then discard_card advances with no second ready", () => {
+    const { room, player } = resolution();
+    emit(room, "ready", "ada", { isReady: true });
+    assert.equal(player.isReady, true);
+    assert.equal(room.state.phase, "resolution");
+
+    emit(room, "discard_card", "ada", { cardIndex: 0 });
+
+    assert.deepEqual(hand(player), ["B", "C"]);
+    assert.equal(player.pendingDiscard, false);
+    assert.equal(room.state.phase, "chart");
+  });
+
+  it("stores ready during a pending discard, then the 15s auto-discard advances", () => {
+    const { room, player } = resolution();
+    emit(room, "ready", "ada", { isReady: true });
+    assert.equal(player.isReady, true);
+    assert.equal(room.state.phase, "resolution");
+
+    advance(room, PENDING_DISCARD_MS);
+
+    assert.deepEqual(hand(player), ["B", "C"]);
+    assert.equal(player.pendingDiscard, false);
+    assert.equal(room.state.phase, "chart");
+  });
+
+  it("does not advance while the over-cap player is not ready", () => {
+    const { room, player } = resolution();
+    assert.equal(player.isReady, false);
+
+    emit(room, "discard_card", "ada", { cardIndex: 0 });
+
+    assert.deepEqual(hand(player), ["B", "C"]);
+    assert.equal(player.pendingDiscard, false);
+    assert.equal(room.state.phase, "resolution");
+
+    emit(room, "ready", "ada", { isReady: true });
+    assert.equal(room.state.phase, "chart");
   });
 });
 

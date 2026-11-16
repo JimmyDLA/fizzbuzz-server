@@ -63,10 +63,12 @@ export class LobbyRoom extends Room {
 
     this.onMessage("ready", (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      if (!player || this.handBlocksActions(player)) return;
+      if (!player) return;
       if (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution") {
         player.isReady = message.isReady;
       }
+      // Remember the press, but do not leave the phase until the extra card is gone.
+      if (this.handBlocksActions(player)) return;
       this.checkAllReady();
     });
 
@@ -278,6 +280,7 @@ export class LobbyRoom extends Room {
       }
       if (removed && player.cards.length <= HAND_CAP) {
         this.clearPendingDiscard(player);
+        this.checkAllReady();
       }
     });
   }
@@ -576,6 +579,7 @@ export class LobbyRoom extends Room {
     while (player.cards.length > HAND_CAP) {
       this.removeCardAt(player, this.oldestHeldIndex(player));
     }
+    this.checkAllReady();
   }
 
   distributeSpecialtyCards() {
