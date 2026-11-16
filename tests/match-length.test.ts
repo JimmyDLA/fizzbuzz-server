@@ -188,6 +188,14 @@ function spins(broadcasts: Broadcast[]): Broadcast[] {
   return broadcasts.filter((entry) => entry.type === "SpinWheelEvent");
 }
 
+function connectedHostIds(room: LobbyRoom): string[] {
+  const ids: string[] = [];
+  room.state.players.forEach((player, id) => {
+    if (player.isConnected && player.isHost) ids.push(id);
+  });
+  return ids;
+}
+
 function podiumFromState(room: LobbyRoom) {
   return room.state.podium.toArray().map((entry) => ({
     place: entry.place,
@@ -696,6 +704,45 @@ describe("podium", { concurrency: 1 }, () => {
     assert.equal(spins(broadcasts).length, 10);
     assert.equal(room.startWheelPhase(), false);
     assert.deepEqual(lobbyError(clients[0]), roundsLockedError());
+    assert.deepEqual(connectedHostIds(room), ["ada"]);
+  });
+
+  it("keeps one connected host on the podium after the host drops", async () => {
+    const { room, clients } = seat(["ada", "bea", "cal"]);
+    enterChart(room, clients);
+    playRounds(room, clients, 9);
+    spin(room, clients);
+    room.startResolutionPhase();
+    assert.equal(room.state.phase, "resolution");
+    assert.equal(room.state.roundCount, 10);
+
+    const pending = beginGrace(room, clients[0]);
+    assert.equal(room.state.players.get("ada")?.isConnected, false);
+    assert.equal(room.state.players.get("ada")?.isHost, false);
+    assert.deepEqual(connectedHostIds(room), ["bea"]);
+    assert.equal(room.state.phase, "resolution");
+
+    room.state.selectedPlayers.clear();
+    room.state.selectedPlayers.push("bea", "cal");
+    readyOutOfResolution(room, clients);
+
+    assert.equal(room.state.phase, "gameover");
+    assert.equal(room.state.podium.length > 0, true);
+    assert.deepEqual(connectedHostIds(room), ["bea"]);
+    const hostFlags: string[] = [];
+    room.state.players.forEach((player, id) => {
+      if (player.isHost) hostFlags.push(id);
+    });
+    assert.deepEqual(hostFlags, ["bea"]);
+
+    setRounds(room, clients[0], 20);
+    assert.equal(room.state.totalRounds, 10);
+    assert.deepEqual(lobbyError(clients[0]), notHostError());
+    setRounds(room, clients[1], 50);
+    assert.equal(room.state.totalRounds, 10);
+    assert.deepEqual(lobbyError(clients[1]), roundsLockedError());
+
+    await finishGrace(room, clients[0], pending);
   });
 
   it("broadcasts co-winners and skips 2nd, including a disconnected seat", () => {
