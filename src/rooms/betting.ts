@@ -189,10 +189,15 @@ function lcm(a: number, b: number): number {
  * pass. In the stake-weighted split only members with a stake above 0 are
  * eligible. Anything still left goes out one point at a time by earliest
  * input order, starting with the highest-remainder group that was skipped.
- * That fallback is the only time tied players differ by 1. A leftover point
- * that would pay a worse place more than a better place who staked at least
- * as much goes to the top group instead, earliest selection first. The shares
- * add up to `pot`.
+ * That fallback is the only time the split itself leaves tied players 1 apart.
+ * A leftover point that would pay a worse place more than a better place who
+ * staked at least as much is redirected to the tied top group. Redirects and
+ * one-at-a-time points that land on that group share one rotation, earliest
+ * selection first, and the rotation carries from the remainder pass into the
+ * fallback. A group award that pays every tied top player does not move it.
+ * Equal-stake tied top players therefore never differ by more than 1. A worse
+ * place with a higher stake may still receive more than a better place. The
+ * shares add up to `pot`.
  */
 export function splitPot(
   placements: readonly Placement[],
@@ -288,7 +293,12 @@ export function splitPot(
     .filter((member) => member.stake > 0)
     .sort((a, b) => a.order - b.order);
   const topEligible = eligibleIn(groups[0] ?? []);
-  const givePreservingOrder = (member: Member) => {
+  let topTurn = 0;
+  const giveNextTop = () => {
+    give(topEligible[topTurn % topEligible.length]);
+    topTurn += 1;
+  };
+  const givePreservingOrder = (member: Member, spreadAcrossTop: boolean) => {
     const next = payoutOf(member) + 1;
     const overtakesBetterPlace = members.some((other) => (
       other.stake > 0
@@ -296,8 +306,13 @@ export function splitPot(
       && member.stake <= other.stake
       && payoutOf(other) < next
     ));
-    if (overtakesBetterPlace && topEligible.length > 0 && topEligible[0] !== member) {
-      give(topEligible[0]);
+    const inTopGroup = topEligible.some((top) => top === member);
+    if (overtakesBetterPlace && topEligible.length > 0 && !inTopGroup) {
+      giveNextTop();
+      return;
+    }
+    if (spreadAcrossTop && inTopGroup) {
+      giveNextTop();
       return;
     }
     give(member);
@@ -323,7 +338,7 @@ export function splitPot(
       skipped.push(group);
       continue;
     }
-    for (const member of group.eligible) givePreservingOrder(member);
+    for (const member of group.eligible) givePreservingOrder(member, false);
     leftover -= group.eligible.length;
     awarded.push(group);
   }
@@ -331,7 +346,7 @@ export function splitPot(
   const oneAtATime = [...skipped, ...awarded].flatMap((group) => group.eligible);
   let cursor = 0;
   while (leftover > 0 && oneAtATime.length > 0) {
-    givePreservingOrder(oneAtATime[cursor % oneAtATime.length]);
+    givePreservingOrder(oneAtATime[cursor % oneAtATime.length], true);
     leftover -= 1;
     cursor += 1;
   }

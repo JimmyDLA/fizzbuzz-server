@@ -683,6 +683,11 @@ export class LobbyRoom extends Room {
     }
     this.stopPendingDiscardTimers();
     this.clearShieldHolds();
+    // A hang (RPS sudden death with no picks) never reaches a result. Dispose
+    // is an abort: give every stake back before the room goes away. A pot that
+    // already settled stays where it was paid. A create that failed before
+    // setState has nothing to refund. This is the only onDispose.
+    if (this.state) this.resetBettingAfterAbort();
     this.releaseClaimedRoomCode();
   }
 
@@ -1670,8 +1675,12 @@ export class LobbyRoom extends Room {
     const seated = this.bettingPlayerIds.filter((id) => this.state.players.has(id));
 
     if (isNoActionResult(resolved)) {
-      const placements = standingsForPlayers(seated, resolved, this.state.lastGameResult);
-      this.refundSeatedStakes("no-action", false, this.competitionRanks(placements));
+      // No winner, so every seat still in the room ties for the refund,
+      // including a player waiting out reconnect grace. Standings omit that
+      // seat (they left the active list) and would otherwise rank them 2nd.
+      const ranks = new Map<string, number>();
+      for (const id of seated) ranks.set(id, 1);
+      this.refundSeatedStakes("no-action", false, ranks);
       for (const id of seated) {
         const player = this.state.players.get(id);
         if (player) player.drinks += 1;
@@ -1823,13 +1832,6 @@ export class LobbyRoom extends Room {
     this.state.bettingPot = returned;
     this.state.bettingRefunded = reason === "no-action";
     this.broadcastBettingPayout(reason, true, payouts);
-  }
-
-  /** Competition place from the same rank weights a payout uses. Pot size does not change the place. */
-  private competitionRanks(placements: Placement[]): Map<string, number> {
-    const ranks = new Map<string, number>();
-    for (const share of splitPot(placements, 0)) ranks.set(share.playerId, share.rank);
-    return ranks;
   }
 
   private refundTrackedStakes(reason: Extract<BettingPayoutReason, "aborted" | "unresolved">): void {

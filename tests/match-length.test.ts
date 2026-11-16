@@ -802,7 +802,16 @@ describe("podium", { concurrency: 1 }, () => {
     });
     enterChart(room, clients);
     playRounds(room, clients, 9);
-    spin(room, clients);
+    // Keep the wheel's shuffle from moving anyone. Selection stays join order,
+    // so Cal's leftover point has one recipient.
+    const random = Math.random;
+    Math.random = () => 0.999999999;
+    try {
+      spin(room, clients);
+    } finally {
+      Math.random = random;
+    }
+    assert.deepEqual(room.state.selectedPlayers.toArray(), ["ada", "bea", "cal"]);
     assert.equal(room.state.roundCount, 9);
     room.startResolutionPhase();
     assert.equal(room.state.roundCount, 10);
@@ -824,15 +833,12 @@ describe("podium", { concurrency: 1 }, () => {
 
     assert.equal(room.state.phase, "gameover");
     assert.equal(closed.count, 1);
-    // Round 10 is a betting round. The spin locked stakes and resolution
-    // never played a game, so the refund returns them. Cal had already left,
-    // and that 1-point stake is shared by the seats that remain. Bea stays
-    // ahead of Ada either way.
-    const podium = podiumFromState(room);
-    assert.deepEqual(podium.map((seat) => seat.playerId), ["bea", "ada"]);
-    assert.deepEqual(podium.map((seat) => seat.place), [1, 2]);
-    assert.equal(podium[0].score + podium[1].score, 13);
-    assert.ok(podium[0].score >= 8);
+    // Round 10 locks 3, 3, and 1 and never plays. Cal leaves, and that 1-point
+    // stake goes to Ada because she was seated first. Bea stays at 8.
+    assert.deepEqual(podiumFromState(room), [
+      { place: 1, playerId: "bea", name: "bea", score: 8 },
+      { place: 2, playerId: "ada", name: "ada", score: 5 },
+    ]);
     assert.ok(room.state.players.has("bea"));
     assert.ok(!podiumFromState(room).some((seat) => seat.playerId === "cal"));
 

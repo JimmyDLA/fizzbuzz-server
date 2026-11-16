@@ -184,8 +184,18 @@ export class SimonSays implements IMiniGame {
     if (gameData.progress) delete gameData.progress[sessionId];
     if (gameData.activePlayers.length <= 1 && !gameData.isGameOver) {
       if (gameData.activePlayers.length === 1) {
+        const survivorId = gameData.activePlayers[0];
         gameData.isGameOver = true;
-        gameData.winners = [gameData.activePlayers[0]];
+        gameData.winners = [survivorId];
+        // A normal elimination records the survivor's round before the game
+        // ends, so they rank strictly above someone knocked out at 0. The
+        // disconnect path has to do the same, or a 0-round knockout ties the
+        // winner on the betting board and skips the drink.
+        const survivor = state.players.get(survivorId);
+        const round = typeof gameData.currentRound === "number" && gameData.currentRound > 0
+          ? gameData.currentRound
+          : 1;
+        if (survivor && (survivor.gameScore || 0) < round) survivor.gameScore = round;
         state.timer = 0;
       }
     }

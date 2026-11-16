@@ -358,6 +358,45 @@ describe("pot split", () => {
     assert.deepEqual(sevenShares.map((share) => share.payout), [2, 1, 1, 1, 1, 1, 0]);
     assert.equal(sevenShares.reduce((sum, share) => sum + share.payout, 0), 7);
 
+    // Redirected leftovers rotate across the tied top group. Standings
+    // 1,9,1,1,1,2,9,1,5,0,0 and pot 7 used to pile both redirects on the
+    // earlier top player (3 and 1). They now share them (2 and 2).
+    const qaStandings = [1, 9, 1, 1, 1, 2, 9, 1, 5, 0, 0];
+    const qaShares = splitPot(
+      qaStandings.map((standing, index) => ({ playerId: `p${index}`, standing })),
+      7,
+    );
+    const qaById = Object.fromEntries(qaShares.map((share) => [share.playerId, share.payout]));
+    assert.deepEqual(qaById, {
+      p0: 1,
+      p1: 2,
+      p2: 0,
+      p3: 0,
+      p4: 0,
+      p5: 1,
+      p6: 2,
+      p7: 0,
+      p8: 1,
+      p9: 0,
+      p10: 0,
+    });
+    assert.deepEqual(
+      qaShares.filter((share) => share.playerId === "p1" || share.playerId === "p6").map((share) => share.rank),
+      [1, 1],
+    );
+    assert.ok(Math.abs(qaById.p1 - qaById.p6) <= 1);
+    assert.equal(qaShares.reduce((sum, share) => sum + share.payout, 0), 7);
+
+    // A remainder-pass redirect and the one-at-a-time fallback share one
+    // rotation. Standings 12,12,12,12,3 and pot 2 used to pay 2,0,0,0,0.
+    const fourWay = splitPot(
+      [12, 12, 12, 12, 3].map((standing, index) => ({ playerId: `p${index}`, standing })),
+      2,
+    );
+    assert.deepEqual(fourWay.map((share) => share.payout), [1, 1, 0, 0, 0]);
+    assert.deepEqual(fourWay.map((share) => share.rank), [1, 1, 1, 1, 5]);
+    assert.equal(fourWay.reduce((sum, share) => sum + share.payout, 0), 2);
+
     // Unequal stakes stay proportional. a and b are tied, but a staked more.
     const uneven = splitPot(tiedFirst, 6, { a: 3, b: 1, c: 1 });
     assert.deepEqual(uneven.map((share) => share.payout), [4, 1, 1]);
@@ -516,6 +555,38 @@ describe("pot split", () => {
 
     const none = splitPot(distinctPlacements(3), 0, { p1: 0, p2: 0, p3: 0 });
     assert.deepEqual(none.map((share) => share.payout), [0, 0, 0]);
+  });
+
+  it("keeps equal-stake tied leaders within 1 across random boards", () => {
+    let seed = 0x6d2b79f5;
+    const rand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    for (let trial = 0; trial < 20000; trial += 1) {
+      const count = 2 + Math.floor(rand() * 11);
+      const placements = Array.from({ length: count }, (_, index) => ({
+        playerId: `p${index}`,
+        standing: Math.floor(rand() * 16),
+      }));
+      const pot = Math.floor(rand() * 40);
+      const stake = 1 + Math.floor(rand() * 3);
+      const stakes: Record<string, number> = {};
+      for (const placement of placements) stakes[placement.playerId] = stake;
+      for (const shares of [splitPot(placements, pot), splitPot(placements, pot, stakes)]) {
+        const top = Math.max(...placements.map((placement) => placement.standing));
+        const topIds = new Set(
+          placements.filter((placement) => placement.standing === top).map((placement) => placement.playerId),
+        );
+        const pays = shares.filter((share) => topIds.has(share.playerId)).map((share) => share.payout);
+        const gap = Math.max(...pays) - Math.min(...pays);
+        assert.ok(
+          gap <= 1,
+          `trial ${trial} standings ${placements.map((placement) => placement.standing).join(",")} pot ${pot} stake ${stake} pays ${shares.map((share) => share.payout).join(",")}`,
+        );
+        assert.equal(shares.reduce((sum, share) => sum + share.payout, 0), pot);
+      }
+    }
   });
 });
 
@@ -921,8 +992,38 @@ describe("no-action betting refunds", () => {
     assert.equal(paid.reason, "payout");
     assert.equal(paid.refunded, false);
     assert.equal(paid.payouts.reduce((sum, entry) => sum + entry.payout, 0), 12);
-    assert.equal(room.state.players.get("ada")?.betPayout, 6);
-    assert.equal(room.state.players.get("cal")?.betPayout, 6);
+    // Cal was knocked out at 0 rounds. The disconnect that ends the game must
+    // rank that elimination under the survivor, the same as a normal knockout.
+    assert.equal(room.state.players.get("ada")?.gameScore, 1);
+    assert.equal(room.state.players.get("cal")?.gameScore, 0);
+    assert.equal(room.state.players.get("ada")?.betRank, 1);
+    assert.equal(room.state.players.get("cal")?.betRank, 2);
+    assert.equal(room.state.players.get("ada")?.betPayout, 8);
+    assert.equal(room.state.players.get("cal")?.betPayout, 4);
+    assert.equal(room.state.players.get("ada")?.drinks, 0);
+    assert.equal(room.state.players.get("cal")?.drinks, 1);
+    assert.equal(room.state.players.get("ada")?.score, 11);
+    assert.equal(room.state.players.get("cal")?.score, 7);
+  });
+
+  it("ranks a disconnect knockout strictly below the Simon Says survivor", async () => {
+    const { room } = bootRoom();
+    const ada = addPlayer(room, "ada", { host: true, score: 6 });
+    const bea = addPlayer(room, "bea", { score: 6 });
+    const cal = addPlayer(room, "cal", { score: 6 });
+    const dee = addPlayer(room, "dee", { score: 6 });
+    room.state.roundCount = 4;
+    assert.equal(room.forceWheelPhase("BR", "Simon Says", ["ada", "bea", "cal", "dee"]), true);
+    await eliminateThenLeave(room, [ada, bea, cal, dee]);
+
+    const survivor = room.state.players.get("ada")!;
+    const eliminated = room.state.players.get("cal")!;
+    assert.ok(survivor.betRank < eliminated.betRank);
+    assert.ok(survivor.betPayout > eliminated.betPayout);
+    assert.equal(survivor.drinks, 0);
+    assert.equal(eliminated.drinks, 1);
+    assert.equal(survivor.betPayout + eliminated.betPayout, 12);
+    assert.equal(room.state.bettingRefunded, false);
   });
 });
 
@@ -1374,6 +1475,47 @@ describe("grace, abort, and non-betting rounds", () => {
     assert.equal(room.state.players.get("ada2")?.name, "Ada");
     await finishGrace(room, ada, pending, false);
   });
+
+  it("ranks a grace seat 1st on a refund when another player has left", async () => {
+    const { room, broadcasts } = bootRoom();
+    const ada = addPlayer(room, "ada", { host: true, score: 9 });
+    const bea = addPlayer(room, "bea", { score: 6 });
+    const cal = addPlayer(room, "cal", { score: 9 });
+    const dee = addPlayer(room, "dee", { score: 3 });
+    room.state.roundCount = 4;
+    assert.equal(room.startWheelPhase(), true);
+    assert.equal(room.state.bettingPot, 12);
+    room.state.phase = "playing";
+
+    await room.onLeave(cal as unknown as Client, CloseCode.CONSENTED);
+    const pending = beginGrace(room, bea);
+    assert.equal(room.state.players.get("bea")?.isConnected, false);
+    assert.equal(room.state.players.has("bea"), true);
+    assert.equal(room.state.players.has("cal"), false);
+
+    room.state.currentCategory = "Tapping Race";
+    room.activeGame = new TappingRace();
+    room.applyActiveGameResult();
+
+    const waiting = room.state.players.get("bea")!;
+    const stayer = room.state.players.get("ada")!;
+    const other = room.state.players.get("dee")!;
+    assert.equal(waiting.betRank, 1);
+    assert.equal(stayer.betRank, 1);
+    assert.equal(other.betRank, 1);
+    assert.equal(waiting.score, 7);
+    assert.equal(stayer.score, 10);
+    assert.equal(other.score, 4);
+    assert.equal(waiting.betPayout, 4);
+    assert.equal(stayer.betPayout + waiting.betPayout + other.betPayout, 12);
+    assert.equal(room.state.bettingRefunded, true);
+    const [paid] = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
+    assert.equal(paid.reason, "no-action");
+    assert.equal(paid.payouts.find((entry) => entry.playerId === "bea")?.rank, 1);
+    assert.equal(ada.sessionId, "ada");
+
+    await finishGrace(room, bea, pending, false);
+  });
 });
 
 function joinNamed(room: LobbyRoom, id: string, name: string): FakeClient {
@@ -1389,3 +1531,232 @@ function joinNamed(room: LobbyRoom, id: string, name: string): FakeClient {
   room.onJoin(client as unknown as Client, { name });
   return client;
 }
+
+interface ManualClock {
+  tick(seconds?: number): void;
+  restore(): void;
+}
+
+/** Room loop and RPS deadlines share one clock, so a no-pick throw can be advanced without waiting. */
+function installManualClock(): ManualClock {
+  let now = 5_000_000;
+  const realNow = Date.now;
+  const realSetInterval = global.setInterval;
+  const realClearInterval = global.clearInterval;
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  let nextId = 1;
+  const intervals = new Map<number, () => void>();
+  const timeouts = new Map<number, { cb: () => void; at: number }>();
+
+  Date.now = () => now;
+  global.setInterval = ((callback: TimerHandler) => {
+    const id = nextId++;
+    intervals.set(id, () => {
+      if (typeof callback === "function") callback();
+    });
+    return id as unknown as ReturnType<typeof setInterval>;
+  }) as unknown as typeof setInterval;
+  global.clearInterval = ((id?: number) => {
+    if (typeof id === "number") intervals.delete(id);
+  }) as unknown as typeof clearInterval;
+  global.setTimeout = ((callback: TimerHandler, delay?: number) => {
+    const id = nextId++;
+    timeouts.set(id, {
+      cb: () => {
+        if (typeof callback === "function") callback();
+      },
+      at: now + (delay ?? 0),
+    });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }) as unknown as typeof setTimeout;
+  global.clearTimeout = ((id?: number) => {
+    if (typeof id === "number") timeouts.delete(id);
+  }) as unknown as typeof clearTimeout;
+
+  return {
+    tick(seconds = 1) {
+      for (let step = 0; step < seconds; step += 1) {
+        now += 1000;
+        for (const callback of [...intervals.values()]) callback();
+        for (const [id, job] of [...timeouts.entries()]) {
+          if (job.at <= now) {
+            timeouts.delete(id);
+            job.cb();
+          }
+        }
+      }
+    },
+    restore() {
+      Date.now = realNow;
+      global.setInterval = realSetInterval;
+      global.clearInterval = realClearInterval;
+      global.setTimeout = realSetTimeout;
+      global.clearTimeout = realClearTimeout;
+    },
+  };
+}
+
+function rpsWord(room: LobbyRoom): string {
+  const id = room.state.selectedPlayers[0];
+  if (!id) return "";
+  try {
+    return JSON.parse(room.state.players.get(id)?.gameData || "{}").animationWord || "";
+  } catch {
+    return "";
+  }
+}
+
+function sumScores(room: LobbyRoom): number {
+  let sum = 0;
+  room.state.players.forEach((player) => {
+    sum += player.score;
+  });
+  return sum;
+}
+
+function tickUntil(clock: ManualClock, ready: () => boolean, maxTicks: number, label: string): void {
+  for (let i = 0; i < maxTicks; i += 1) {
+    if (ready()) return;
+    clock.tick(1);
+  }
+  assert.equal(ready(), true, label);
+}
+
+describe("Rock Paper Scissors no-pick rounds", () => {
+  function openRps(betting: boolean) {
+    const { room, broadcasts } = bootRoom();
+    const ada = addPlayer(room, "ada", { host: true, score: 9 });
+    const bea = addPlayer(room, "bea", { score: 9 });
+    if (betting) room.state.roundCount = 4;
+    assert.equal(room.forceWheelPhase("BR", "Rock Paper Scissors", ["ada", "bea"]), true);
+    const clock = installManualClock();
+    room.startPlayingPhase();
+    room.state.timer = 1;
+    return { room, broadcasts, ada, bea, clock };
+  }
+
+  function reachSuddenDeath(room: LobbyRoom, clock: ManualClock): void {
+    tickUntil(clock, () => rpsWord(room) === "SUDDEN DEATH!", 8, "regulation with no picks did not reach sudden death");
+    assert.equal(room.state.phase, "playing");
+  }
+
+  function reachNoPickReplay(room: LobbyRoom, clock: ManualClock): void {
+    if (rpsWord(room) === "NO PICK! TRY AGAIN...") clock.tick(1);
+    tickUntil(clock, () => rpsWord(room) === "NO PICK! TRY AGAIN...", 20, "sudden-death throw with no picks did not replay");
+  }
+
+  it("moves a regulation round with no picks into sudden death", () => {
+    const { room, clock } = openRps(false);
+    try {
+      reachSuddenDeath(room, clock);
+      assert.equal(room.state.players.get("ada")?.score, 9);
+      assert.equal(room.state.players.get("bea")?.drinks, 0);
+      assert.notEqual(room.state.phase, "resolution");
+    } finally {
+      room.onDispose();
+      clock.restore();
+    }
+  });
+
+  it("replays a sudden-death throw when nobody picks, with no cap", () => {
+    const { room, clock } = openRps(false);
+    try {
+      reachSuddenDeath(room, clock);
+      for (let replay = 0; replay < 3; replay += 1) {
+        reachNoPickReplay(room, clock);
+        assert.equal(room.state.phase, "playing");
+        assert.equal(room.state.players.get("ada")?.score, 9);
+        assert.equal(room.state.players.get("bea")?.score, 9);
+        assert.equal(room.state.players.get("ada")?.drinks, 0);
+      }
+    } finally {
+      room.onDispose();
+      clock.restore();
+    }
+  });
+
+  it("pays a betting round that reached sudden death with no regulation picks", () => {
+    const { room, broadcasts, ada, clock } = openRps(true);
+    try {
+      assert.equal(room.state.bettingPot, 6);
+      assert.equal(sumScores(room), 12);
+      reachSuddenDeath(room, clock);
+      emit(room, "game_action", ada, { action: "pick", choice: "rock" });
+      tickUntil(
+        clock,
+        () => events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT).length === 1,
+        40,
+        "betting round never paid after a sudden-death winner",
+      );
+      const [paid] = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
+      assert.equal(paid.reason, "payout");
+      assert.equal(paid.refunded, false);
+      assert.equal(paid.payouts.reduce((sum, entry) => sum + entry.payout, 0), 6);
+      assert.equal(room.state.players.get("ada")?.score, 10);
+      assert.equal(room.state.players.get("bea")?.score, 8);
+      assert.equal(room.state.players.get("bea")?.drinks, 1);
+      assert.equal(room.state.players.get("ada")?.drinks, 0);
+      assert.equal(sumScores(room), 18);
+      const locked = room.state.players.get("ada")!.score + room.state.players.get("bea")!.score;
+      room.onDispose();
+      assert.equal(room.state.players.get("ada")!.score + room.state.players.get("bea")!.score, locked);
+    } finally {
+      room.onDispose();
+      clock.restore();
+    }
+  });
+
+  it("refunds a betting sudden-death throw that nobody picks when the room is disposed", () => {
+    const { room, broadcasts, clock } = openRps(true);
+    try {
+      assert.equal(sumScores(room), 12);
+      reachSuddenDeath(room, clock);
+      reachNoPickReplay(room, clock);
+      assert.equal(room.state.phase, "playing");
+      assert.equal(room.state.players.get("ada")?.betWager, 3);
+      room.onDispose();
+      assert.equal(room.state.players.get("ada")?.score, 9);
+      assert.equal(room.state.players.get("bea")?.score, 9);
+      assert.equal(room.state.players.get("ada")?.betWager, 0);
+      assert.equal(room.state.players.get("bea")?.betWager, 0);
+      assert.equal(room.state.bettingPot, 0);
+      assert.equal(sumScores(room), 18);
+      const refunds = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
+      assert.equal(refunds[refunds.length - 1].reason, "aborted");
+      assert.equal(refunds[refunds.length - 1].refunded, true);
+      room.onDispose();
+      assert.equal(room.state.players.get("ada")?.score, 9);
+      assert.equal(room.state.players.get("bea")?.score, 9);
+    } finally {
+      room.onDispose();
+      clock.restore();
+    }
+  });
+
+  it("refunds locked stakes when everyone leaves during a no-pick hang", async () => {
+    const { room, broadcasts, ada, bea, clock } = openRps(true);
+    try {
+      reachSuddenDeath(room, clock);
+      reachNoPickReplay(room, clock);
+      assert.equal(room.state.players.get("ada")?.score, 6);
+      assert.equal(room.state.players.get("bea")?.score, 6);
+      await room.onLeave(bea as unknown as Client, CloseCode.CONSENTED);
+      await room.onLeave(ada as unknown as Client, CloseCode.CONSENTED);
+      const cache = (room as unknown as {
+        disconnectedPlayersCache: Map<string, { score: number }>;
+      }).disconnectedPlayersCache;
+      assert.equal(cache.get("ada")?.score, 9);
+      assert.equal(cache.get("bea")?.score, 9);
+      assert.equal(room.state.bettingPot, 0);
+      assert.equal(room.state.players.has("ada"), false);
+      assert.equal(room.state.players.has("bea"), false);
+      const refunds = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
+      assert.equal(refunds[refunds.length - 1].reason, "aborted");
+      assert.equal(refunds[refunds.length - 1].refunded, true);
+    } finally {
+      room.onDispose();
+      clock.restore();
+    }
+  });
+});
