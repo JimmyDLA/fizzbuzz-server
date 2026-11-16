@@ -12,6 +12,12 @@ export const SUDDEN_DEATH_PICK_MS = 10000;
 const TIE_RESET_MS = 2000;
 const REVEAL_MS = 2000;
 
+function beats(left: string, right: string): boolean {
+  return (left === "rock" && right === "scissors") ||
+         (left === "paper" && right === "rock") ||
+         (left === "scissors" && right === "paper");
+}
+
 /**
  * Best of 3 during the room timer. A tied throw replays with no score.
  * If time runs out on a level score, sudden death replays throws until one
@@ -72,11 +78,12 @@ export class RockPaperScissors implements IMiniGame {
 
   onMessage(client: Client, message: any, state: LobbyState): void {
     if (this.isEnded) return;
+    if (!message || typeof message !== "object") return;
     if (message.action !== "pick") return;
     if (this.picks.has(client.sessionId)) return;
     if (this.animationStartTime > 0) return;
     if (typeof message.choice !== "string") return;
-    const choice = message.choice.toLowerCase();
+    const choice = message.choice.trim().toLowerCase();
     if (choice !== "rock" && choice !== "paper" && choice !== "scissors") return;
 
     this.picks.set(client.sessionId, choice);
@@ -193,10 +200,7 @@ export class RockPaperScissors implements IMiniGame {
     }
 
     if (p1 !== undefined && p2 !== undefined) {
-      const p1Wins = (p1 === "rock" && p2 === "scissors") ||
-                     (p1 === "paper" && p2 === "rock") ||
-                     (p1 === "scissors" && p2 === "paper");
-      this.awardThrow(state, p1Wins ? p1Id : p2Id);
+      this.awardThrow(state, beats(p1, p2) ? p1Id : p2Id);
       return;
     }
 
@@ -319,12 +323,17 @@ export class RockPaperScissors implements IMiniGame {
 
   /**
    * Battle Royale removes the leaver from selectedPlayers before this runs.
-   * A new contestant takes the dropped player's round wins and both players
-   * start a fresh throw, so a leftover pick window cannot decide the match.
+   * A throw both contestants already locked is scored first. Otherwise the
+   * substitute takes the dropped player's round wins and starts a fresh throw.
    */
   onPlayerDisconnect(sessionId: string, state: LobbyState): void {
     if (this.isEnded) return;
     const previous = this.activePair;
+    if (previous && this.animationStartTime > 0 && this.picks.has(previous[0]) && this.picks.has(previous[1])) {
+      this.resolveSealedThrow(state, previous);
+      if (this.isEnded) return;
+    }
+
     const next = this.contestants(state);
     this.activePair = next;
     if (!previous || !next) return;
@@ -340,6 +349,30 @@ export class RockPaperScissors implements IMiniGame {
     }
     this.roundScores.delete(sessionId);
     this.beginFreshThrow(state);
+  }
+
+  /** Apply a throw that was already locked, using the pair who locked it. */
+  private resolveSealedThrow(state: LobbyState, pair: [string, string]): void {
+    const [p1Id, p2Id] = pair;
+    const p1 = this.picks.get(p1Id);
+    const p2 = this.picks.get(p2Id);
+    this.picks.clear();
+    this.animationStartTime = 0;
+    this.revealTime = 0;
+    this.pickDeadline = 0;
+    if (p1 === undefined || p2 === undefined || p1 === p2) return;
+
+    const winnerId = beats(p1, p2) ? p1Id : p2Id;
+    const loserId = winnerId === p1Id ? p2Id : p1Id;
+    const newScore = (this.roundScores.get(winnerId) || 0) + 1;
+    this.roundScores.set(winnerId, newScore);
+
+    const score1 = this.roundScores.get(p1Id) || 0;
+    const score2 = this.roundScores.get(p2Id) || 0;
+    const leader = score1 > score2 && score1 > 0 ? p1Id : score2 > score1 && score2 > 0 ? p2Id : null;
+    if (this.suddenDeath || newScore >= 2 || (this.regulationExpired && leader !== null)) {
+      this.endMatch(state, winnerId, loserId);
+    }
   }
 
   private beginFreshThrow(state: LobbyState): void {
@@ -366,12 +399,12 @@ export class RockPaperScissors implements IMiniGame {
     });
   }
 
-  private endMatch(state: LobbyState, winnerId: string): void {
+  private endMatch(state: LobbyState, winnerId: string, loserId?: string): void {
     this.isEnded = true;
     this.pickDeadline = 0;
     this.matchWinnerId = winnerId;
     const pair = this.contestants(state);
-    this.matchLoserId = pair ? (pair[0] === winnerId ? pair[1] : pair[0]) : null;
+    this.matchLoserId = loserId ?? (pair ? (pair[0] === winnerId ? pair[1] : pair[0]) : null);
     const name = state.players.get(winnerId)?.name || "Winner";
     this.broadcast(state, {
       scores: this.scoreMap(state),

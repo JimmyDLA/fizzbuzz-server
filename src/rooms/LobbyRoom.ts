@@ -96,6 +96,7 @@ export class LobbyRoom extends Room {
     });
 
     this.onMessage("game_action", (client, message) => {
+      if (message == null || typeof message !== "object") return;
       if (this.state.phase === "playing" && this.activeGame) {
         this.activeGame.onMessage(client, message, this.state);
       }

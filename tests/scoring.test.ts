@@ -1229,6 +1229,44 @@ describe("Rock Paper Scissors", () => {
     });
   });
 
+  it("a locked throw is scored before a contestant is substituted", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+    });
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 15;
+    withClock((advance) => {
+      playRound(game, state, "rock", "scissors", advance);
+      game.onMessage(client("a"), { action: "pick", choice: "rock" }, state);
+      game.onMessage(client("b"), { action: "pick", choice: "paper" }, state);
+      advance(1000);
+      game.onTick(state);
+      assert.equal(word(state), "PAPER...");
+
+      dropSelected(state, "a");
+      game.onPlayerDisconnect("a", state);
+
+      const shown = view(state, "c");
+      assert.equal(shown.scores.b, 1);
+      assert.equal(shown.scores.c, 1);
+      assert.equal(shown.animationWord, "FRESH THROW!");
+      assert.equal(player(state, "b").drinks, 0);
+      assert.equal(player(state, "c").score, 0);
+
+      state.timer = 0;
+      assert.equal(lobbyTick(game, state), false);
+      assert.equal(view(state, "b").animationWord, "SUDDEN DEATH!");
+      assert.equal(player(state, "b").drinks, 0);
+      assert.equal(player(state, "c").score, 0);
+    });
+  });
+
   it("ignores a choice other than rock, paper, or scissors", () => {
     const state = makeState(pair());
     const game = new RockPaperScissors();
@@ -1245,7 +1283,7 @@ describe("Rock Paper Scissors", () => {
       assert.equal(player(state, "a").score, 0);
       assert.equal(player(state, "b").drinks, 0);
 
-      game.onMessage(client("a"), { action: "pick", choice: "ROCK" }, state);
+      game.onMessage(client("a"), { action: "pick", choice: " ROCK " }, state);
       advance(3200);
       game.onTick(state);
       advance(2001);
@@ -2068,6 +2106,35 @@ describe("Double Points", () => {
 });
 
 describe("LobbyRoom", () => {
+  it("a null or non-object game_action does not throw", () => {
+    const room = new LobbyRoom();
+    room.onCreate({});
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+      ],
+    });
+    room.setState(state);
+    state.phase = "playing";
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    room.activeGame = game;
+
+    const emit = (message: unknown) => {
+      (room as unknown as { onMessageEvents: { emit: (type: string, client: unknown, message: unknown) => void } })
+        .onMessageEvents.emit("game_action", client("a"), message);
+    };
+    assert.doesNotThrow(() => {
+      emit(null);
+      emit(undefined);
+      emit("pick");
+    });
+    emit({ action: "pick", choice: "rock" });
+    assert.deepEqual(JSON.parse(player(state, "a").gameData).picks, { a: true });
+  });
+
   it("applies +3 per winner and one drink per loser from the game result", () => {
     const state = makeState({
       type: "BR",
