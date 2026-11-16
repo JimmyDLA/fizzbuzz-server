@@ -320,10 +320,10 @@ describe("pot split", () => {
     for (const stakes of [undefined, equalStakes]) {
       const small = splitPot(tiedFirst, 3, stakes);
       const large = splitPot(tiedFirst, 6, stakes);
-      // Pot 3: c's 3/7 remainder takes the single leftover point.
+      // a and b share (3+2)/2 = 2.5. Pot 3 leaves c the larger remainder, so c takes the point.
       assert.deepEqual(small.map((share) => share.payout), [1, 1, 1]);
-      // Pot 6: c's 6/7 remainder takes one point, then the tie of 2 does not fit and a is earliest.
-      assert.deepEqual(large.map((share) => share.payout), [3, 2, 1]);
+      // Pot 6 floors to 2, 2, 1. The tie of 2 does not fit the last point, and c's group of 1 does.
+      assert.deepEqual(large.map((share) => share.payout), [2, 2, 2]);
       assert.deepEqual(small.map((share) => share.rank), [1, 1, 3]);
       assert.equal(small.reduce((sum, share) => sum + share.payout, 0), 3);
       assert.equal(large.reduce((sum, share) => sum + share.payout, 0), 6);
@@ -369,8 +369,9 @@ describe("pot split", () => {
     const weighted = splitPot(middle, 8, { a: 1, b: 1, c: 1, d: 1 });
     assert.deepEqual(weighted.map((share) => share.payout), [3, 2, 2, 1]);
 
-    // Two pairs. The lower pair has the larger remainder and takes the points it can share.
-    // The last point does not cover the top pair, so the earliest of that pair takes it.
+    // Two pairs average their place weights and share a remainder. The better rank
+    // goes first, so the top pair takes the two points it can share. The last point
+    // does not cover the lower pair, and the earlier of that pair takes it.
     const pairs = splitPot(
       [
         { playerId: "a", standing: 4 },
@@ -380,12 +381,27 @@ describe("pot split", () => {
       ],
       5,
     );
-    assert.deepEqual(pairs.map((share) => share.payout), [2, 1, 1, 1]);
+    assert.deepEqual(pairs.map((share) => share.payout), [2, 2, 1, 0]);
     assert.deepEqual(pairs.map((share) => share.rank), [1, 1, 3, 3]);
     assert.equal(pairs.reduce((sum, share) => sum + share.payout, 0), 5);
   });
 
-  it("uses the best rank's weight for a tie and still conserves the pot", () => {
+  it("averages the weights of a tie and pays a 2nd-place tie 4, 1, 0 from stakes 3, 2, 0", () => {
+    const second = splitPot(
+      [
+        { playerId: "a", standing: 2 },
+        { playerId: "b", standing: 1 },
+        { playerId: "c", standing: 1 },
+      ],
+      5,
+      { a: 3, b: 2, c: 0 },
+    );
+    assert.deepEqual(second.map((share) => share.payout), [4, 1, 0]);
+    assert.deepEqual(second.map((share) => share.rank), [1, 2, 2]);
+    assert.equal(second.reduce((sum, share) => sum + share.payout, 0), 5);
+  });
+
+  it("uses the average place weight for a tie and still conserves the pot", () => {
     const shares = splitPot(
       [
         { playerId: "a", standing: 10 },
@@ -705,6 +721,40 @@ function assertNoActionRefund(
 }
 
 describe("no-action betting refunds", () => {
+  it("pays 4, 1, 0 when only the winner cut and the other two tie on stakes 3, 2, 0", () => {
+    const { room } = bootRoom();
+    const ada = addPlayer(room, "ada", { score: 3, host: true });
+    const bea = addPlayer(room, "bea", { score: 2 });
+    const cal = addPlayer(room, "cal", { score: 0 });
+    room.state.roundCount = 4;
+    assert.equal(room.startWheelPhase(), true);
+    const game = new LumberCut();
+    game.onInit(room.state);
+    game.onMessage(client(ada.sessionId), { action: "pull", side: "left" }, room.state);
+    game.onMessage(client(ada.sessionId), { action: "pull", side: "right" }, room.state);
+    room.activeGame = game;
+    room.applyActiveGameResult();
+
+    assert.equal(room.state.players.get("ada")?.betPayout, 4);
+    assert.equal(room.state.players.get("bea")?.betPayout, 1);
+    assert.equal(room.state.players.get("cal")?.betPayout, 0);
+    assert.equal(room.state.players.get("ada")?.score, 4);
+    assert.equal(room.state.players.get("bea")?.score, 1);
+    assert.equal(room.state.players.get("cal")?.score, 0);
+    assert.equal(room.state.players.get("ada")?.betRank, 1);
+    assert.equal(room.state.players.get("bea")?.betRank, 2);
+    assert.equal(room.state.players.get("cal")?.betRank, 2);
+    assert.equal(room.state.bettingPot, 5);
+    assert.equal(room.state.bettingRefunded, false);
+    assert.equal(
+      (room.state.players.get("ada")?.betPayout ?? 0)
+        + (room.state.players.get("bea")?.betPayout ?? 0)
+        + (room.state.players.get("cal")?.betPayout ?? 0),
+      5,
+    );
+    assert.ok(bea.sessionId && cal.sessionId);
+  });
+
   it("refunds a Lumber Cut where nobody cut", () => {
     const { room, broadcasts } = bootRoom();
     addPlayer(room, "ada", { score: 9, host: true });

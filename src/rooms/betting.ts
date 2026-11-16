@@ -161,9 +161,25 @@ function placementRows(lastGameResult: string): LeaderboardRow[] | null {
   }
 }
 
+function gcd(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const next = x % y;
+    x = y;
+    y = next;
+  }
+  return x || 1;
+}
+
+function lcm(a: number, b: number): number {
+  return (a / gcd(a, b)) * b;
+}
+
 /**
  * Pot split. Rank weight is n for 1st down to 1 for last. Tied players each
- * take the weight of the best rank they share. A stake of 0 pays 0.
+ * take the average of the weights of the places they occupy, as an exact
+ * fraction. A stake of 0 pays 0.
  * Exact share is pot × (stake × weight) / Σ(stake × weight). Omit `stakes`
  * to give every player a stake of 1, which is the plain-rank split.
  * Each player is floored. One leftover pass visits rank groups by fractional
@@ -200,7 +216,9 @@ export function splitPot(
     playerId: string;
     rank: number;
     stake: number;
-    weight: number;
+    /** Average place-weight, in lowest terms. */
+    weightNum: number;
+    weightDen: number;
     order: number;
     floor: number;
     remainder: number;
@@ -213,14 +231,22 @@ export function splitPot(
     let end = index + 1;
     while (end < ordered.length && ordered[end].standing === standing) end += 1;
     const rank = index + 1;
-    const weight = n - rank + 1;
+    const groupSize = end - index;
+    let weightSum = 0;
+    for (let offset = 0; offset < groupSize; offset += 1) {
+      weightSum += n - (rank + offset) + 1;
+    }
+    const divisor = gcd(weightSum, groupSize);
+    const weightNum = weightSum / divisor;
+    const weightDen = groupSize / divisor;
     const group: Member[] = [];
     for (let cursor = index; cursor < end; cursor += 1) {
       group.push({
         playerId: ordered[cursor].playerId,
         rank,
         stake: ordered[cursor].stake,
-        weight,
+        weightNum,
+        weightDen,
         order: ordered[cursor].order,
         floor: 0,
         remainder: 0,
@@ -231,7 +257,11 @@ export function splitPot(
   }
 
   const members = groups.flat();
-  const weightTotal = members.reduce((sum, member) => sum + member.stake * member.weight, 0);
+  const scale = members.reduce((acc, member) => lcm(acc, member.weightDen), 1);
+  const scaledWeight = members.map((member) => (
+    member.stake * member.weightNum * (scale / member.weightDen)
+  ));
+  const weightTotal = scaledWeight.reduce((sum, value) => sum + value, 0);
   if (weightTotal === 0 || safePot === 0) {
     return members.map((member) => ({
       playerId: member.playerId,
@@ -240,10 +270,10 @@ export function splitPot(
     }));
   }
 
-  for (const member of members) {
-    const numerator = safePot * member.stake * member.weight;
-    member.floor = Math.floor(numerator / weightTotal);
-    member.remainder = numerator % weightTotal;
+  for (let memberIndex = 0; memberIndex < members.length; memberIndex += 1) {
+    const numerator = safePot * scaledWeight[memberIndex];
+    members[memberIndex].floor = Math.floor(numerator / weightTotal);
+    members[memberIndex].remainder = numerator % weightTotal;
   }
   let leftover = safePot - members.reduce((sum, member) => sum + member.floor, 0);
   const extra = new Map<string, number>();
