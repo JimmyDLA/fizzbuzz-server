@@ -14,6 +14,7 @@ import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
 import { applyDoublePoints, applyStandardScoring } from "./scoring";
+import { claimRoomCode, releaseRoomCode } from "./roomCodes";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
@@ -27,6 +28,8 @@ export class LobbyRoom extends Room {
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
   private isCardLocked: boolean = false;
   private shieldChainCount: number = 0;
+  /** Code held until the room is disposed, including the gap before the matchmaker lists it. */
+  private claimedRoomCode: string | null = null;
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -48,9 +51,8 @@ export class LobbyRoom extends Room {
     return true;
   }
 
-  onCreate(options: any) {
-    this.roomId = Math.floor(1000 + Math.random() * 9000).toString();
-    this.setState(new LobbyState());
+  async onCreate(options: any) {
+    await this.assignUniqueRoomCode();
 
     this.onMessage("ready", (client, message) => {
       const player = this.state.players.get(client.sessionId);
@@ -266,6 +268,31 @@ export class LobbyRoom extends Room {
         }
       }
     });
+  }
+
+  onDispose() {
+    this.releaseClaimedRoomCode();
+  }
+
+  /**
+   * Pick a 4-digit code no live room holds. The matchmaker listing is written
+   * after onCreate, so the code stays reserved until onDispose.
+   */
+  private async assignUniqueRoomCode(): Promise<void> {
+    this.claimedRoomCode = await claimRoomCode();
+    try {
+      this.roomId = this.claimedRoomCode;
+      this.setState(new LobbyState());
+    } catch (error) {
+      this.releaseClaimedRoomCode();
+      throw error;
+    }
+  }
+
+  private releaseClaimedRoomCode() {
+    if (this.claimedRoomCode === null) return;
+    releaseRoomCode(this.claimedRoomCode);
+    this.claimedRoomCode = null;
   }
 
   onJoin(client: Client, options: any) {
