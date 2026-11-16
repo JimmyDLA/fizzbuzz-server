@@ -189,6 +189,8 @@ describe("actions while over the cap", () => {
     const { player } = addPlayer(room, "ada", "Ada", true);
     award(room, "ada", "SHIELD");
     award(room, "ada", "TURBO");
+    // Earned in round 1. Usable once that round has resolved and the next wheel starts.
+    room.state.roundCount = 1;
     room.state.phase = "wheel";
     room.state.currentCategory = "Tapping Race";
     room.state.selectedPlayers.push("ada");
@@ -443,6 +445,8 @@ describe("after the player picks", () => {
     emit(room, "discard_card", "ada", { cardIndex: 0 });
     assert.deepEqual(hand(player), ["RESPIN", "TURBO"]);
 
+    // Earned in round 1. Usable once that round has resolved and the next wheel starts.
+    room.state.roundCount = 1;
     room.state.phase = "wheel";
     room.state.currentCategory = "Tapping Race";
     room.state.selectedPlayers.push("ada");

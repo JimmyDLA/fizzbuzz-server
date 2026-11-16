@@ -11,6 +11,14 @@ export class Player extends Schema {
   @type("string") gameData: string = ""; // Temporary JSON schema state
   @type("boolean") isConnected: boolean = true;
   @type(["string"]) cards = new ArraySchema<string>();
+  /**
+   * Same index as `cards`. The round that card was earned.
+   * It can be played once the round in progress is greater than this value.
+   * During `resolution` the round in progress is `roundCount`.
+   * In every other phase it is `roundCount + 1`, because `roundCount` advances
+   * at the start of resolution, which is also when cards are dealt.
+   */
+  @type(["number"]) earnedRounds = new ArraySchema<number>();
   @type("string") activeEffects: string = ""; // JSON string e.g. {"turbo":true,"doublePoints":true}
   /** Hand is over the 2-card cap until the player discards or the server does. */
   @type("boolean") pendingDiscard: boolean = false;

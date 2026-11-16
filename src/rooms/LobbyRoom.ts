@@ -29,7 +29,7 @@ export class LobbyRoom extends Room {
   maxClients = 8;
   gameLoopInterval: any;
   activeGame: IMiniGame | null = null;
-  private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], cardAcquiredAt: number[], activeEffects: string }>();
+  private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], cardAcquiredAt: number[], cardEarnedRounds?: number[], activeEffects: string }>();
   /** Parallel to `player.cards`: lower means held longer. Keyed by session id. */
   private cardAcquiredAt = new Map<string, number[]>();
   private nextAcquiredAt = 1;
@@ -99,6 +99,7 @@ export class LobbyRoom extends Room {
       if (targetClient) {
         targetClient.send("CardAwardedEvent", {
           cardId: cardId,
+          earnedRound: targetPlayer.earnedRounds[targetPlayer.earnedRounds.length - 1],
           reason: "DEV OVERRIDE",
           message: `Dev granted you a ${cardId} card!`
         });
@@ -116,8 +117,20 @@ export class LobbyRoom extends Room {
       if (!player || this.handBlocksActions(player)) return;
 
       const cardId = message.cardId;
-      const cardIndex = player.cards.indexOf(cardId);
-      if (cardIndex === -1) return; // Player doesn't own card
+      if (typeof cardId !== "string") return;
+      const cardIndex = this.indexOfUsableCard(player, cardId);
+      if (cardIndex === -1) {
+        if (this.ownsCardEarnedThisRound(player, cardId)) {
+          const owned = this.indexOfCard(player, cardId);
+          client.send("CardErrorEvent", {
+            cardId,
+            code: "earned_this_round",
+            earnedRound: player.earnedRounds[owned],
+            message: "This card can't be used until next round.",
+          });
+        }
+        return;
+      }
 
       if (cardId === "RESPIN") {
         if ((this.state.phase === "wheel" || this.state.phase === "chart") && !this.isCardLocked) {
@@ -184,10 +197,12 @@ export class LobbyRoom extends Room {
             return;
           }
 
+          const earnedRound = player.earnedRounds[cardIndex];
           this.removeCardAt(player, cardIndex);
           let fx: any = {};
           try { fx = JSON.parse(player.activeEffects || "{}"); } catch(e) {}
           fx.turbo = true;
+          if (typeof earnedRound === "number") fx.turboEarnedRound = earnedRound;
           player.activeEffects = JSON.stringify(fx);
           this.broadcast("CardUsedEvent", {
             userId: client.sessionId,
@@ -307,7 +322,12 @@ export class LobbyRoom extends Room {
         player.score = oldPlayer.score;
         player.drinks = oldPlayer.drinks;
         player.isHost = oldPlayer.isHost;
-        this.copyHeldCards(player, oldPlayer.cards, this.cardAcquiredAt.get(existingPlayerId));
+        this.copyHeldCards(
+          player,
+          oldPlayer.cards,
+          this.cardAcquiredAt.get(existingPlayerId),
+          oldPlayer.earnedRounds.toArray(),
+        );
         player.activeEffects = oldPlayer.activeEffects;
       }
       this.clearPendingDiscardTimer(existingPlayerId);
@@ -322,7 +342,7 @@ export class LobbyRoom extends Room {
         player.score = cached.score;
         player.drinks = cached.drinks;
         if (cached.cards && cached.cards.length > 0) {
-          this.copyHeldCards(player, cached.cards, cached.cardAcquiredAt);
+          this.copyHeldCards(player, cached.cards, cached.cardAcquiredAt, cached.cardEarnedRounds);
         }
         if (cached.activeEffects) {
           player.activeEffects = cached.activeEffects;
@@ -396,6 +416,7 @@ export class LobbyRoom extends Room {
     this.discardNewestOverCap(player);
     const cardsArray = player.cards.toArray ? player.cards.toArray() : Array.from(player.cards);
     const cardAcquiredAt = [...(this.cardAcquiredAt.get(player.id) ?? [])];
+    const cardEarnedRounds = player.earnedRounds.toArray ? player.earnedRounds.toArray() : Array.from(player.earnedRounds);
     player.isConnected = false;
 
     // Check if player was part of the current active game session
@@ -437,6 +458,7 @@ export class LobbyRoom extends Room {
         drinks: player.drinks,
         cards: cardsArray,
         cardAcquiredAt,
+        cardEarnedRounds,
         activeEffects: player.activeEffects || "{}"
       });
       this.removePlayer(client.sessionId);
@@ -454,6 +476,7 @@ export class LobbyRoom extends Room {
           drinks: player.drinks,
           cards: cardsArray,
           cardAcquiredAt,
+          cardEarnedRounds,
           activeEffects: player.activeEffects || "{}"
         });
         this.removePlayer(client.sessionId);
@@ -463,27 +486,41 @@ export class LobbyRoom extends Room {
 
   /**
    * The only place a card is awarded into a hand.
-   * A later ticket can stamp award metadata (the round the card was earned) on `cardId` here,
-   * before `pushCard`. Reconnect restores cards through `copyHeldCards` and must not re-stamp them.
+   * Stamps `earnedRound` here, before `pushCard`. A Turbo refund may pass the
+   * card's original round so the refund is not a new award. Reconnect restores
+   * cards through `copyHeldCards` and must not re-stamp them.
    * Returns false when the hand already has its temporary third card; that award is skipped.
    */
-  private awardCard(player: Player, cardId: string): boolean {
+  private awardCard(player: Player, cardId: string, earnedRound?: number): boolean {
     if (player.pendingDiscard || player.cards.length > HAND_CAP) {
       console.log(`[awardCard] Skipped ${cardId} for ${player.name}: discard already pending`);
       return false;
     }
 
-    this.pushCard(player, cardId);
+    this.pushCard(player, cardId, undefined, earnedRound ?? this.currentRound());
     if (player.cards.length > HAND_CAP) {
       this.beginPendingDiscard(player);
     }
     return true;
   }
 
-  private pushCard(player: Player, cardId: string, acquiredAt?: number): void {
+  /**
+   * Round in progress. `roundCount` ticks at the start of resolution, which is
+   * also when specialty cards are dealt, so chart/wheel/countdown/playing are
+   * still the next round.
+   */
+  private currentRound(): number {
+    if (this.state.phase === "resolution") return this.state.roundCount;
+    return this.state.roundCount + 1;
+  }
+
+  private pushCard(player: Player, cardId: string, acquiredAt?: number, earnedRound?: number): void {
     const order = this.orderFor(player);
     while (order.length < player.cards.length) {
       order.push(this.nextAcquiredAt++);
+    }
+    while (player.earnedRounds.length < player.cards.length) {
+      player.earnedRounds.push(0);
     }
     let stamp = acquiredAt;
     if (stamp === undefined) {
@@ -493,13 +530,21 @@ export class LobbyRoom extends Room {
     }
     player.cards.push(cardId);
     order.push(stamp);
+    player.earnedRounds.push(earnedRound ?? 0);
   }
 
-  private copyHeldCards(player: Player, cards: ArrayLike<string>, acquiredAt?: number[]): void {
+  private copyHeldCards(player: Player, cards: ArrayLike<string>, acquiredAt?: number[], earnedRounds?: number[]): void {
     const stamps = acquiredAt ?? [];
+    const rounds = earnedRounds ?? [];
     const useStamps = stamps.length === cards.length;
+    const useRounds = rounds.length === cards.length;
     for (let i = 0; i < cards.length; i++) {
-      this.pushCard(player, cards[i], useStamps ? stamps[i] : undefined);
+      this.pushCard(
+        player,
+        cards[i],
+        useStamps ? stamps[i] : undefined,
+        useRounds ? rounds[i] : undefined,
+      );
     }
   }
 
@@ -516,8 +561,44 @@ export class LobbyRoom extends Room {
     if (index < 0 || index >= player.cards.length) return false;
     const order = this.cardAcquiredAt.get(player.id);
     if (order && index < order.length) order.splice(index, 1);
+    if (index < player.earnedRounds.length) player.earnedRounds.splice(index, 1);
     player.cards.splice(index, 1);
+    while (player.earnedRounds.length > player.cards.length) player.earnedRounds.pop();
     return true;
+  }
+
+  private indexOfCard(player: Player, cardId: string): number {
+    for (let i = 0; i < player.cards.length; i++) {
+      if (player.cards[i] === cardId) return i;
+    }
+    return -1;
+  }
+
+  /** First copy of `cardId` earned in an earlier round. A same-round copy is skipped. */
+  private indexOfUsableCard(player: Player, cardId: string): number {
+    const round = this.currentRound();
+    for (let i = 0; i < player.cards.length; i++) {
+      if (player.cards[i] !== cardId) continue;
+      if ((player.earnedRounds[i] ?? 0) >= round) continue;
+      return i;
+    }
+    return -1;
+  }
+
+  private ownsCardEarnedThisRound(player: Player, cardId: string): boolean {
+    const round = this.currentRound();
+    for (let i = 0; i < player.cards.length; i++) {
+      if (player.cards[i] === cardId && (player.earnedRounds[i] ?? 0) >= round) return true;
+    }
+    return false;
+  }
+
+  /** Keep the round the Turbo was earned so a refund is not a new award. */
+  private clearTurboForRefund(fx: Record<string, unknown>): number | undefined {
+    const refundRound = typeof fx.turboEarnedRound === "number" ? fx.turboEarnedRound : undefined;
+    fx.turbo = false;
+    delete fx.turboEarnedRound;
+    return refundRound;
   }
 
   private oldestHeldIndex(player: Player): number {
@@ -638,6 +719,7 @@ export class LobbyRoom extends Room {
       if (client) {
         client.send("CardAwardedEvent", {
           cardId,
+          earnedRound: player.earnedRounds[player.earnedRounds.length - 1],
           reason: isLastPlace ? "last_place" : "round_reward",
           message: isLastPlace
             ? "UNDERDOG BOOST — You earned the best card for being in last place!"
@@ -748,9 +830,9 @@ export class LobbyRoom extends Room {
           try {
             const fx = JSON.parse(p.activeEffects);
             if (fx.turbo) {
-              fx.turbo = false;
+              const refundRound = this.clearTurboForRefund(fx);
               p.activeEffects = JSON.stringify(fx);
-              this.awardCard(p, "TURBO");
+              this.awardCard(p, "TURBO", refundRound);
             }
           } catch(e) {}
         }
@@ -803,9 +885,9 @@ export class LobbyRoom extends Room {
           try {
             const fx = JSON.parse(p.activeEffects);
             if (fx.turbo) {
-              fx.turbo = false;
+              const refundRound = this.clearTurboForRefund(fx);
               p.activeEffects = JSON.stringify(fx);
-              this.awardCard(p, "TURBO");
+              this.awardCard(p, "TURBO", refundRound);
             }
           } catch(e) {}
         }
