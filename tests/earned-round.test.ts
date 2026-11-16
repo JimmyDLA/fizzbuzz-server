@@ -87,6 +87,10 @@ function addPlayer(room: LobbyRoom, id: string, name: string, host = false): { p
   return { player, messages };
 }
 
+function seedChains(room: LobbyRoom): void {
+  (room as unknown as { seedDrinkChains(): void }).seedDrinkChains();
+}
+
 function award(room: LobbyRoom, id: string, cardId: string, from = id): void {
   enableDevTools();
   emit(room, "dev_award_card", from, { targetPlayerId: id, cardId });
@@ -230,6 +234,7 @@ describe("same round rejected, next round allowed", () => {
     assert.deepEqual(rounds(player), [3]);
     player.drinks = 1;
     room.state.lastLosers.push("ada");
+    seedChains(room);
 
     const errors: Sent[] = [];
     emit(room, "use_card", "ada", { cardId: "SHIELD", targetPlayerId: "bea" }, errors);
@@ -440,6 +445,7 @@ describe("hand cap, auto-discard, and reconnect", () => {
     addPlayer(room, "bea", "Bea");
     restored.drinks = 1;
     room.state.lastLosers.push("ada-2");
+    seedChains(room);
     emit(room, "use_card", "ada-2", { cardId: "SHIELD", targetPlayerId: "bea" }, errors);
     assert.deepEqual(hand(restored), ["TURBO"]);
     assert.deepEqual(rounds(restored), [6]);

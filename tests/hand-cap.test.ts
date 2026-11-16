@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
-import type { Client } from "@colyseus/core";
+import { CloseCode, type Client } from "@colyseus/core";
 import { LobbyRoom, HAND_CAP, PENDING_DISCARD_MS } from "../src/rooms/LobbyRoom";
 import { Player } from "../src/rooms/schema/LobbyState";
-import { client, enableDevTools, leaveConsented } from "./helpers";
+import { client, enableDevTools } from "./helpers";
 
 enableDevTools();
+
+// dev_award_card is host-only and off unless this flag is set in development or test.
+process.env.NODE_ENV = "test";
+process.env.ALLOW_DEV_TOOLS = "1";
 
 /**
  * CRD-005, CRD-012, CRD-016. The server allows one temporary third card.
@@ -66,20 +70,6 @@ function addPlayer(room: LobbyRoom, id: string, name: string, host = false): { p
 function award(room: LobbyRoom, id: string, cardId: string, from = id): void {
   enableDevTools();
   emit(room, "dev_award_card", from, { targetPlayerId: id, cardId });
-}
-
-/** A forced spin needs two connected players once the wheel checks the floor. */
-function spin(room: LobbyRoom, type: string, category: string, primary = "ada"): void {
-  const ids = [primary];
-  room.state.players.forEach((player, id) => {
-    if (id !== primary && player.isConnected) ids.push(id);
-  });
-  if (ids.length < 2) {
-    const mate = `${primary}-mate`;
-    addPlayer(room, mate, "Mate");
-    ids.push(mate);
-  }
-  room.forceWheelPhase(type, category, ids);
 }
 
 function overflow(cardIds: [string, string, string] = ["OLDEST", "MIDDLE", "NEWEST"]): {
@@ -421,7 +411,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     player.score = 9;
     player.drinks = 2;
 
-    await leaveConsented(room, "ada");
+    await room.onLeave(client("ada"), CloseCode.CONSENTED);
 
     assert.equal(room.state.players.has("ada"), false);
     room.onJoin(client("ada-2"), { name: "Ada" });
@@ -440,7 +430,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     emit(room, "discard_card", "ada", { cardIndex: 2 });
     assert.deepEqual(hand(player), ["OLDEST", "MIDDLE"]);
 
-    await leaveConsented(room, "ada");
+    await room.onLeave(client("ada"), CloseCode.CONSENTED);
     room.onJoin(client("ada-2"), { name: "Ada" });
     assert.deepEqual(hand(room.state.players.get("ada-2")!), ["OLDEST", "MIDDLE"]);
   });
@@ -511,11 +501,12 @@ describe("round drop and turbo refund", () => {
   it("refunds TURBO onto a 2-card hand as the temporary third card", () => {
     const room = setup();
     const { player } = addPlayer(room, "ada", "Ada", true);
+    addPlayer(room, "bea", "Bea");
     award(room, "ada", "SHIELD");
     award(room, "ada", "RESPIN");
     player.activeEffects = JSON.stringify({ turbo: true, doublePoints: true });
 
-    spin(room, "1v1", "Hot Potato");
+    room.forceWheelPhase("1v1", "Hot Potato", ["ada", "bea"]);
 
     assert.deepEqual(hand(player), ["SHIELD", "RESPIN", "TURBO"]);
     assert.equal(player.pendingDiscard, true);
@@ -526,9 +517,10 @@ describe("round drop and turbo refund", () => {
 
   it("skips a TURBO refund that would be a 4th card", () => {
     const { room, player } = overflow(["SHIELD", "RESPIN", "WILD CARD"]);
+    addPlayer(room, "bea", "Bea");
     player.activeEffects = JSON.stringify({ turbo: true });
 
-    spin(room, "BR", "Simon Says");
+    room.forceWheelPhase("BR", "Simon Says", ["ada", "bea"]);
 
     assert.deepEqual(hand(player), ["SHIELD", "RESPIN", "WILD CARD"]);
     assert.equal(JSON.parse(player.activeEffects).turbo, false);
@@ -537,10 +529,11 @@ describe("round drop and turbo refund", () => {
   it("does not refund TURBO for a category that can use it", () => {
     const room = setup();
     const { player } = addPlayer(room, "ada", "Ada", true);
+    addPlayer(room, "bea", "Bea");
     award(room, "ada", "SHIELD");
     player.activeEffects = JSON.stringify({ turbo: true });
 
-    spin(room, "1v1", "Tapping Race");
+    room.forceWheelPhase("1v1", "Tapping Race", ["ada", "bea"]);
 
     assert.deepEqual(hand(player), ["SHIELD"]);
     assert.equal(JSON.parse(player.activeEffects).turbo, true);
