@@ -13,6 +13,10 @@ export class Player extends Schema {
   @type("boolean") isConnected: boolean = true;
   @type(["string"]) cards = new ArraySchema<string>();
   @type("string") activeEffects: string = ""; // JSON string e.g. {"turbo":true,"doublePoints":true}
+  /** Hand is over the 2-card cap until the player discards or the server does. */
+  @type("boolean") pendingDiscard: boolean = false;
+  /** Epoch ms when the server will discard the oldest card. 0 when not pending. */
+  @type("number") pendingDiscardDeadline: number = 0;
 }
 
 /** One seat on the end-of-match podium. `place` is 1, 2, or 3. Ties share a place. */
