@@ -2,10 +2,10 @@
  * Match length and the end-of-match podium.
  *
  * `roundCount` advances only when resolution starts. `upcomingRoundNumber`
- * is the 1-based round a chart spin will play (`roundCount + 1`). A later
- * betting ticket (every 5th round, including a final multiple of 5) branches
- * on that value before the wheel. A no-action betting round refunds wagers
- * there. This module does not run betting.
+ * is the 1-based round a chart spin will play (`roundCount + 1`). Betting
+ * (every 5th round, including a final multiple of 5) reads that value before
+ * the wheel and does not change `roundCount`. Wagers and the pot live in
+ * `betting.ts`. This module does not move points.
  */
 
 export const ROUND_CHOICES = [10, 15, 20, 30, 40, 50] as const;

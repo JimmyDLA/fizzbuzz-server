@@ -34,6 +34,24 @@ export class Player extends Schema {
   @type("boolean") isConnected: boolean = true;
   @type(["string"]) cards = new ArraySchema<string>();
   @type("string") activeEffects: string = ""; // JSON string e.g. {"turbo":true,"doublePoints":true}
+  /**
+   * Points taken into the pot when a betting round starts. 0 on any other round.
+   * Capped at min(3, the points the player had). Already removed from `score`.
+   */
+  @type("number") betWager: number = 0;
+  /** Points paid back from the pot when the betting round resolves. 0 until then. */
+  @type("number") betPayout: number = 0;
+  /**
+   * betPayout − betWager once the round resolves. While the round is still
+   * being played this is −betWager, matching the points already removed from score.
+   */
+  @type("number") betNet: number = 0;
+  /**
+   * 1-based competition rank for this betting round. Ties share the best rank.
+   * Set whenever the round has a placement, including a no-action board of
+   * all zeros. 0 until then, and 0 after an abort clears the round.
+   */
+  @type("number") betRank: number = 0;
   /** Hand is over the 2-card cap until the player discards or the server does. */
   @type("boolean") pendingDiscard: boolean = false;
   /** Epoch ms when the server will discard the oldest card. 0 when not pending. */
@@ -76,4 +94,22 @@ export class LobbyState extends Schema {
   @type("number") readyCount: number = 0;
   /** Connected players. Disconnected seats are excluded from the ready count. */
   @type("number") connectedCount: number = 0;
+  /**
+   * True while the round on screen is a betting round. Before resolution that
+   * round is roundCount + 1. During resolution and gameover it is roundCount.
+   * The app shows the "Betting round" banner from this flag.
+   */
+  @type("boolean") isBettingRound: boolean = false;
+  /**
+   * Sum of the stakes still in play. A player who left for good does not take
+   * their stake with them: it stays here and is paid to the seats that remain.
+   * 0 outside a locked betting round, and 0 again after an abort clears the display.
+   */
+  @type("number") bettingPot: number = 0;
+  /**
+   * True after a no-action betting round returns every wager.
+   * Cleared when the next chart is shown, and kept on gameover so the podium
+   * can still see that the last pot was returned.
+   */
+  @type("boolean") bettingRefunded: boolean = false;
 }
