@@ -588,6 +588,34 @@ describe("pot split", () => {
       }
     }
   });
+
+  it("pays out exactly the pot when stakes differ", () => {
+    let seed = 0x6d2b79f6;
+    const rand = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    for (let trial = 0; trial < 20000; trial += 1) {
+      const count = 2 + Math.floor(rand() * 11);
+      const placements = Array.from({ length: count }, (_, index) => ({
+        playerId: `p${index}`,
+        standing: Math.floor(rand() * 16),
+      }));
+      const pot = Math.floor(rand() * 40);
+      const stakes: Record<string, number> = {};
+      // A board with every stake at 0 has no weight to divide, so redraw until
+      // someone staked. The payouts of that board add up to the pot.
+      do {
+        for (const placement of placements) stakes[placement.playerId] = Math.floor(rand() * 4);
+      } while (Object.values(stakes).every((stake) => stake === 0));
+      const shares = splitPot(placements, pot, stakes);
+      assert.equal(
+        shares.reduce((sum, share) => sum + share.payout, 0),
+        pot,
+        `trial ${trial} standings ${placements.map((placement) => placement.standing).join(",")} pot ${pot} stakes ${placements.map((placement) => stakes[placement.playerId]).join(",")} pays ${shares.map((share) => share.payout).join(",")}`,
+      );
+    }
+  });
 });
 
 describe("betting round resolution", () => {
