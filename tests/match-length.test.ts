@@ -3,7 +3,7 @@ import { after, before, describe, it } from "node:test";
 import { CloseCode, ErrorCode, Server, matchMaker } from "@colyseus/core";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import type { Client } from "@colyseus/core";
-import { LobbyRoom } from "../src/rooms/LobbyRoom";
+import { HAND_CAP, LobbyRoom } from "../src/rooms/LobbyRoom";
 import {
   LOBBY_ERROR_EVENT,
   invalidRoundsError,
@@ -110,6 +110,10 @@ function emit(room: LobbyRoom, type: string, client: FakeClient, message?: unkno
 }
 
 function ready(room: LobbyRoom, client: FakeClient, isReady = true): void {
+  const player = room.state.players.get(client.sessionId);
+  while (player?.pendingDiscard && player.cards.length > HAND_CAP) {
+    emit(room, "discard_card", client, { cardIndex: player.cards.length - 1 });
+  }
   emit(room, "ready", client, { isReady });
 }
 
@@ -149,7 +153,7 @@ function discardPending(room: LobbyRoom, clients: FakeClient[]): void {
   for (const client of clients) {
     const player = room.state.players.get(client.sessionId);
     if (!player?.pendingDiscard) continue;
-    while (player.pendingDiscard && player.cards.length > 2) {
+    while (player.pendingDiscard && player.cards.length > HAND_CAP) {
       emit(room, "discard_card", client, { cardIndex: player.cards.length - 1 });
     }
   }
