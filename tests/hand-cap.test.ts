@@ -5,7 +5,9 @@ import { describe, it } from "node:test";
 import { CloseCode, type Client } from "@colyseus/core";
 import { LobbyRoom, HAND_CAP, PENDING_DISCARD_MS } from "../src/rooms/LobbyRoom";
 import { Player } from "../src/rooms/schema/LobbyState";
-import { client } from "./helpers";
+import { client, enableDevTools } from "./helpers";
+
+enableDevTools();
 
 // dev_award_card is host-only and off unless this flag is set in development or test.
 process.env.NODE_ENV = "test";
@@ -49,7 +51,8 @@ function addPlayer(room: LobbyRoom, id: string, name: string, host = false): { p
   const player = new Player();
   player.id = id;
   player.name = name;
-  player.isHost = host;
+  const hostTaken = Array.from(room.state.players.values()).some((existing) => existing.isHost);
+  player.isHost = host && !hostTaken;
   player.isConnected = true;
   player.isReady = false;
   player.score = 0;
@@ -65,6 +68,7 @@ function addPlayer(room: LobbyRoom, id: string, name: string, host = false): { p
 }
 
 function award(room: LobbyRoom, id: string, cardId: string, from = id): void {
+  enableDevTools();
   emit(room, "dev_award_card", from, { targetPlayerId: id, cardId });
 }
 
@@ -193,6 +197,8 @@ describe("actions while over the cap", () => {
     const { player } = addPlayer(room, "ada", "Ada", true);
     award(room, "ada", "SHIELD");
     award(room, "ada", "TURBO");
+    // Earned in round 1. Usable once that round has resolved and the next wheel starts.
+    room.state.roundCount = 1;
     room.state.phase = "wheel";
     room.state.currentCategory = "Tapping Race";
     room.state.selectedPlayers.push("ada");
@@ -541,6 +547,8 @@ describe("after the player picks", () => {
     emit(room, "discard_card", "ada", { cardIndex: 0 });
     assert.deepEqual(hand(player), ["RESPIN", "TURBO"]);
 
+    // Earned in round 1. Usable once that round has resolved and the next wheel starts.
+    room.state.roundCount = 1;
     room.state.phase = "wheel";
     room.state.currentCategory = "Tapping Race";
     room.state.selectedPlayers.push("ada");

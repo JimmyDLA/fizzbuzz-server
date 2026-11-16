@@ -1,4 +1,4 @@
-import type { Client } from "@colyseus/core";
+import { CloseCode, type Client } from "@colyseus/core";
 import assert from "node:assert/strict";
 import { GameResult, IMiniGame } from "../src/games/IMiniGame";
 import { LobbyState, Player } from "../src/rooms/schema/LobbyState";
@@ -28,6 +28,28 @@ export interface ExpectedOutcome {
 
 export function client(id: string): Client {
   return { sessionId: id, send() { /* word_feedback and similar acks */ } } as unknown as Client;
+}
+
+/**
+ * Host dev commands (`dev_award_card`, `dev_start_wheel`) run only when both
+ * are set. Harmless on a server that does not check them yet.
+ */
+export function enableDevTools(): void {
+  process.env.ALLOW_DEV_TOOLS = "1";
+  process.env.NODE_ENV = "test";
+}
+
+/**
+ * Consented leave for both onLeave shapes.
+ * Close code 4000 is `CloseCode.CONSENTED`. It is also truthy, so a server
+ * that still treats the argument as a boolean takes the consented path.
+ * 1006 (`ABNORMAL_CLOSURE`) is the abnormal drop once onLeave reads close codes.
+ */
+export function leaveConsented(
+  room: { onLeave(client: Client, code?: number): unknown },
+  sessionId: string,
+): unknown {
+  return room.onLeave(client(sessionId), CloseCode.CONSENTED);
 }
 
 export function makeState(options: {
