@@ -13,9 +13,10 @@ export interface GameResult {
   losers: string[];
   /**
    * Players who shared the decisive tie.
-   * Non-RPS score ties list the players who all win. RPS lists both players,
-   * who still lose. Screen Painting lists everyone at the top coverage, while
-   * only the earliest selected id is a winner.
+   * Non-RPS score ties list the players who all win. A finished RPS match has
+   * one winner and one loser; tied throws are replayed and are not reported
+   * here. Screen Painting lists everyone at the top coverage, while only the
+   * earliest selected id is a winner.
    * A no-action round leaves this empty.
    */
   tiedIds: string[];
