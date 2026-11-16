@@ -47,6 +47,18 @@ async function isListedInMatchmaker(code: string): Promise<boolean> {
   return existing != null;
 }
 
+/**
+ * Same listing check as getRoomById, but synchronous. LocalDriver.has reads
+ * the in-memory cache directly. A missing driver means this process has not
+ * booted the matchmaker, so only the in-process reservation applies.
+ */
+function isListedInMatchmakerNow(code: string): boolean {
+  const driver = matchMaker.driver;
+  if (!driver) return false;
+  const listed = driver.has(code);
+  return listed === true;
+}
+
 const matchmakerLookup: RoomCodeLookup = {
   isLive: isListedInMatchmaker,
 };
@@ -60,27 +72,68 @@ function nextUntried(tried: Set<string>, after: number): string | null {
   return null;
 }
 
+function nextCandidate(tried: Set<string>): string | null {
+  let code = drawRoomCode();
+  if (!isCanonicalRoomCode(code) || tried.has(code)) {
+    const pivot = isCanonicalRoomCode(code) ? Number(code) : ROOM_CODE_MIN - 1;
+    const next = nextUntried(tried, pivot);
+    if (next === null) return null;
+    code = next;
+  }
+  tried.add(code);
+  return code;
+}
+
+function roomCodesExhausted(): ServerError {
+  return new ServerError(
+    ErrorCode.MATCHMAKE_UNHANDLED,
+    "No room codes available. All codes from 1000 to 9999 are already in use.",
+  );
+}
+
 /**
- * Claim a free code in 1000–9999. Retries while the code is reserved on this
- * process or already listed for any live room. Throws when all 9000 are taken
- * so create fails instead of reusing a live code.
+ * Claim a free code in 1000–9999 without awaiting. onCreate must finish the
+ * room id and state before it yields; Colyseus lists the room only after that.
+ * Retries while the code is reserved on this process or already listed.
+ * Throws when all 9000 are taken so create fails instead of reusing a live code.
+ */
+export function claimRoomCodeNow(): string {
+  const tried = new Set<string>();
+
+  while (tried.size < ROOM_CODE_SPAN) {
+    const code = nextCandidate(tried);
+    if (code === null) break;
+    if (reservedCodes.has(code)) continue;
+
+    // Reserve before the matchmaker read so a concurrent create cannot take it.
+    reservedCodes.add(code);
+    try {
+      if (isListedInMatchmakerNow(code)) {
+        reservedCodes.delete(code);
+        continue;
+      }
+      return code;
+    } catch (error) {
+      reservedCodes.delete(code);
+      throw error;
+    }
+  }
+
+  throw roomCodesExhausted();
+}
+
+/**
+ * Async claim for a caller-supplied lookup. Production create uses
+ * claimRoomCodeNow so the room is ready before onCreate yields.
  */
 export async function claimRoomCode(lookup: RoomCodeLookup = matchmakerLookup): Promise<string> {
   const tried = new Set<string>();
 
   while (tried.size < ROOM_CODE_SPAN) {
-    let code = drawRoomCode();
-    if (!isCanonicalRoomCode(code) || tried.has(code)) {
-      const pivot = isCanonicalRoomCode(code) ? Number(code) : ROOM_CODE_MIN - 1;
-      const next = nextUntried(tried, pivot);
-      if (next === null) break;
-      code = next;
-    }
-
-    tried.add(code);
+    const code = nextCandidate(tried);
+    if (code === null) break;
     if (reservedCodes.has(code)) continue;
 
-    // Reserve before the matchmaker read so a concurrent create cannot take it.
     reservedCodes.add(code);
     try {
       if (await lookup.isLive(code)) {
@@ -94,10 +147,7 @@ export async function claimRoomCode(lookup: RoomCodeLookup = matchmakerLookup): 
     }
   }
 
-  throw new ServerError(
-    ErrorCode.MATCHMAKE_UNHANDLED,
-    "No room codes available. All codes from 1000 to 9999 are already in use.",
-  );
+  throw roomCodesExhausted();
 }
 
 export function releaseRoomCode(code: string): void {
