@@ -1000,4 +1000,104 @@ describe("grace, abort, and non-betting rounds", () => {
     assert.equal(room.state.players.get("cal")?.betWager, 3);
     assert.equal(room.state.bettingPot, 6);
   });
+
+  it("keeps the host's stake when grace promotes the earliest player, then pays the pot once", async () => {
+    const { room } = bootRoom();
+    const ada = joinNamed(room, "ada", "Ada");
+    joinNamed(room, "bea", "Bea");
+    joinNamed(room, "cal", "Cal");
+    for (const id of ["ada", "bea", "cal"]) room.state.players.get(id)!.score = 9;
+    assert.equal(room.state.players.get("ada")?.isHost, true);
+    room.state.roundCount = 4;
+    assert.equal(room.startWheelPhase(), true);
+    room.state.phase = "playing";
+
+    const pending = beginGrace(room, ada);
+    assert.equal(room.state.players.get("bea")?.isHost, true);
+    assert.equal(room.state.players.get("ada")?.isHost, false);
+    assert.equal(room.state.players.get("ada")?.score, 6);
+    assert.equal(room.state.bettingPot, 9);
+
+    await finishGrace(room, ada, pending, true);
+    assert.equal(room.state.players.get("bea")?.isHost, true);
+    assert.equal(room.state.players.get("ada")?.score, 6);
+    assert.equal(room.state.players.get("ada")?.betWager, 3);
+    assert.equal(room.state.bettingPot, 9);
+
+    room.state.currentCategory = "Tapping Race";
+    room.activeGame = new TappingRace();
+    room.applyActiveGameResult();
+    const payout = ["ada", "bea", "cal"].reduce((sum, id) => sum + (room.state.players.get(id)?.betPayout ?? 0), 0);
+    const scores = ["ada", "bea", "cal"].reduce((sum, id) => sum + (room.state.players.get(id)?.score ?? 0), 0);
+    assert.equal(payout, 9);
+    assert.equal(scores, 27);
+  });
+
+  it("promotes the earliest player when the host leaves and still pays that stake", async () => {
+    const { room } = bootRoom();
+    const ada = joinNamed(room, "ada", "Ada");
+    joinNamed(room, "bea", "Bea");
+    joinNamed(room, "cal", "Cal");
+    for (const id of ["ada", "bea", "cal"]) room.state.players.get(id)!.score = 9;
+    room.state.roundCount = 4;
+    room.startWheelPhase();
+    room.state.players.get("bea")!.gameScore = 5;
+    room.state.players.get("cal")!.gameScore = 1;
+    room.state.phase = "playing";
+    await room.onLeave(ada as unknown as Client, CloseCode.CONSENTED);
+
+    assert.equal(room.state.players.has("ada"), false);
+    assert.equal(room.state.players.get("bea")?.isHost, true);
+    assert.equal(room.state.bettingPot, 9);
+    room.state.currentCategory = "Tapping Race";
+    room.activeGame = new TappingRace();
+    room.applyActiveGameResult();
+    const bea = room.state.players.get("bea")!;
+    const cal = room.state.players.get("cal")!;
+    assert.equal(bea.betPayout, 6);
+    assert.equal(cal.betPayout, 3);
+    assert.equal(bea.score + cal.score, 21);
+  });
+
+  it("moves the stake onto a name rejoin so the refund is not paid to someone else", async () => {
+    const { room } = bootRoom();
+    const ada = joinNamed(room, "ada", "Ada");
+    joinNamed(room, "bea", "Bea");
+    joinNamed(room, "cal", "Cal");
+    for (const id of ["ada", "bea", "cal"]) room.state.players.get(id)!.score = 9;
+    room.state.roundCount = 4;
+    room.startWheelPhase();
+    room.state.phase = "playing";
+    const pending = beginGrace(room, ada);
+
+    const ada2 = joinNamed(room, "ada2", "Ada");
+    assert.equal(room.state.players.has("ada"), false);
+    assert.equal(room.state.players.get("ada2")?.score, 6);
+    assert.equal(room.state.players.get("ada2")?.betWager, 3);
+    assert.equal(room.state.players.get("bea")?.isHost, true);
+    await finishGrace(room, ada, pending, false);
+
+    room.state.currentCategory = "Tapping Race";
+    room.activeGame = new TappingRace();
+    room.applyActiveGameResult();
+    assert.equal(room.state.players.get("ada2")?.score, 9);
+    assert.equal(room.state.players.get("bea")?.score, 9);
+    assert.equal(room.state.players.get("cal")?.score, 9);
+    assert.equal(room.state.bettingPot, 9);
+    assert.equal(ada2.sessionId, "ada2");
+  });
 });
+
+function joinNamed(room: LobbyRoom, id: string, name: string): FakeClient {
+  const client: FakeClient = {
+    sessionId: id,
+    sent: [],
+    send(type, payload) {
+      this.sent.push({ type, payload });
+    },
+    enqueueRaw() {},
+  };
+  room.clients.push(client as unknown as LobbyRoom["clients"][number]);
+  room.onJoin(client as unknown as Client, { name });
+  return client;
+}
