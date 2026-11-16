@@ -14,6 +14,7 @@ import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
 import { applyDoublePoints, applyStandardScoring, scoreGameResult } from "./scoring";
+import { claimRoomCodeNow, releaseRoomCode } from "./roomCodes";
 import { specialtyCardDropPool, specialtyCardRarity } from "./specialtyCards";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
@@ -37,6 +38,8 @@ export class LobbyRoom extends Room {
   private pendingDiscardTimers = new Map<string, { clear(): void }>();
   private isCardLocked: boolean = false;
   private shieldChainCount: number = 0;
+  /** Code held until the room is disposed, including the gap before the matchmaker lists it. */
+  private claimedRoomCode: string | null = null;
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -58,9 +61,9 @@ export class LobbyRoom extends Room {
     return true;
   }
 
-  onCreate(options: any) {
-    this.roomId = Math.floor(1000 + Math.random() * 9000).toString();
-    this.setState(new LobbyState());
+  async onCreate(options: any) {
+    // Claim before any await so state exists for callers that do not await onCreate.
+    this.assignUniqueRoomCode();
 
     this.onMessage("ready", (client, message) => {
       const player = this.state.players.get(client.sessionId);
@@ -284,6 +287,27 @@ export class LobbyRoom extends Room {
         this.checkAllReady();
       }
     });
+  }
+
+  /**
+   * Pick a 4-digit code no live room holds. The matchmaker listing is written
+   * after onCreate, so the code stays reserved until onDispose.
+   */
+  private assignUniqueRoomCode(): void {
+    this.claimedRoomCode = claimRoomCodeNow();
+    try {
+      this.roomId = this.claimedRoomCode;
+      this.setState(new LobbyState());
+    } catch (error) {
+      this.releaseClaimedRoomCode();
+      throw error;
+    }
+  }
+
+  private releaseClaimedRoomCode() {
+    if (this.claimedRoomCode === null) return;
+    releaseRoomCode(this.claimedRoomCode);
+    this.claimedRoomCode = null;
   }
 
   onJoin(client: Client, options: any) {
@@ -929,5 +953,6 @@ export class LobbyRoom extends Room {
   onDispose() {
     for (const timer of this.pendingDiscardTimers.values()) timer.clear();
     this.pendingDiscardTimers.clear();
+    this.releaseClaimedRoomCode();
   }
 }
