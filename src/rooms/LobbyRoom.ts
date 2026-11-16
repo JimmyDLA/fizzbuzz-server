@@ -740,7 +740,6 @@ export class LobbyRoom extends Room {
       requiredPlayers = 2;
     }
 
-    this.isCardLocked = false;
     this.shieldChainCount = 0;
     // Chart readiness must not carry into the post-wheel Ready to Play step.
     this.clearReadyFlags();
@@ -781,7 +780,6 @@ export class LobbyRoom extends Room {
       return false;
     }
 
-    this.isCardLocked = false;
     this.shieldChainCount = 0;
     // A Wild Card or dev spin also opens a fresh Ready to Play step.
     this.clearReadyFlags();
