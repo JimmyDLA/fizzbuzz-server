@@ -10,6 +10,10 @@ export const ROOM_CODE_SPAN = ROOM_CODE_MAX - ROOM_CODE_MIN + 1;
  * Colyseus writes the listing only after onCreate resolves, so two creates
  * that both ask the matchmaker can otherwise pick the same code.
  * Released from onDispose, once the room is gone and the code may be reused.
+ *
+ * Reservations are per process, in memory. Running multiple server processes
+ * would need a shared store such as Redis or Colyseus presence to guarantee
+ * unique codes.
  */
 const reservedCodes = new Set<string>();
 
