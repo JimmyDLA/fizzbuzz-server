@@ -14,6 +14,8 @@ import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
 import { applyDoublePoints, applyStandardScoring } from "./scoring";
+import { MAX_ROOM_PLAYERS, connectedPlayerIds, hasEnoughConnectedPlayers } from "./connectedPlayers";
+import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "./lobbyErrors";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
@@ -21,7 +23,7 @@ const EXCLUDED_TURBO_GAMES = ["Hot Potato", "Rock Paper Scissors", "Simon Says"]
 
 export class LobbyRoom extends Room {
   state!: LobbyState;
-  maxClients = 8;
+  maxClients = MAX_ROOM_PLAYERS;
   gameLoopInterval: any;
   activeGame: IMiniGame | null = null;
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
@@ -54,8 +56,12 @@ export class LobbyRoom extends Room {
 
     this.onMessage("ready", (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      if (player && (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution")) {
+      const canReady = !!player && (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution");
+      if (canReady && player) {
         player.isReady = message.isReady;
+      }
+      if (canReady && message?.isReady === true && this.state.phase === "lobby" && !hasEnoughConnectedPlayers(this.state.players)) {
+        client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
       }
       this.checkAllReady();
     });
@@ -63,14 +69,19 @@ export class LobbyRoom extends Room {
     this.onMessage("start_wheel", (client) => {
       const player = this.state.players.get(client.sessionId);
       if (player && player.isHost && this.state.phase === "chart") {
-        this.startWheelPhase();
+        if (!this.startWheelPhase()) {
+          client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
+        }
       }
     });
 
     this.onMessage("dev_start_wheel", (client, message) => {
       const player = this.state.players.get(client.sessionId);
       if (player && player.isHost && this.state.phase === "chart") {
-        this.forceWheelPhase(message.type, message.category, message.selectedPlayers);
+        const selectedPlayers = Array.isArray(message?.selectedPlayers) ? message.selectedPlayers : [];
+        if (!this.forceWheelPhase(message?.type, message?.category, selectedPlayers)) {
+          client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
+        }
       }
     });
 
@@ -140,7 +151,7 @@ export class LobbyRoom extends Room {
           player.cards.splice(cardIndex, 1);
 
           const category = message.category || CATEGORIES[0];
-          const selectedPlayers = message.selectedPlayers || Array.from(this.state.players.keys()).slice(0, 2);
+          const selectedPlayers = message.selectedPlayers || connectedPlayerIds(this.state.players).slice(0, 2);
           const type = message.type || (selectedPlayers.length === 2 ? "1v1" : selectedPlayers.length === 4 ? "2v2" : "BR");
 
           // Reset ready status for all players
@@ -559,6 +570,9 @@ export class LobbyRoom extends Room {
 
     if (allReady) {
       if (this.state.phase === "lobby") {
+        if (!hasEnoughConnectedPlayers(this.state.players)) {
+          return;
+        }
         this.state.players.forEach(p => p.isReady = false);
         this.state.phase = "chart";
       } else if (this.state.phase === "wheel") {
@@ -571,19 +585,45 @@ export class LobbyRoom extends Room {
     }
   }
 
-  startWheelPhase() {
+  startWheelPhase(): boolean {
+    const contestantIds = connectedPlayerIds(this.state.players);
+    if (!hasEnoughConnectedPlayers(this.state.players)) {
+      return false;
+    }
+
+    let gameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
+    const category = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
+
+    // Enforce Category Restrictions
+    if (category === "Rock Paper Scissors" || category === "Simon Says" || category === "Perfection") {
+      if (gameType === "2v2") gameType = "1v1";
+    } else if (category === "Hot Potato" && gameType === "2v2") {
+      gameType = "1v1"; // Fallback from 2v2 for Hot Potato
+    }
+
+    for (let i = contestantIds.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [contestantIds[i], contestantIds[j]] = [contestantIds[j], contestantIds[i]];
+    }
+
+    let requiredPlayers = contestantIds.length;
+    if (gameType === "1v1") requiredPlayers = 2;
+    if (gameType === "2v2") requiredPlayers = 4;
+
+    // Not enough connected contestants for the drawn mode. Never start a 1-player BR.
+    if (requiredPlayers > contestantIds.length) {
+      if (!hasEnoughConnectedPlayers(this.state.players, contestantIds)) {
+        return false;
+      }
+      gameType = "1v1";
+      requiredPlayers = 2;
+    }
+
     this.isCardLocked = false;
     this.shieldChainCount = 0;
     this.state.phase = "wheel";
-    this.state.currentGameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
-    this.state.currentCategory = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
-
-    // Enforce Category Restrictions
-    if (this.state.currentCategory === "Rock Paper Scissors" || this.state.currentCategory === "Simon Says" || this.state.currentCategory === "Perfection") {
-      if (this.state.currentGameType === "2v2") this.state.currentGameType = "1v1";
-    } else if (this.state.currentCategory === "Hot Potato" && this.state.currentGameType === "2v2") {
-      this.state.currentGameType = "1v1"; // Fallback from 2v2 for Hot Potato
-    }
+    this.state.currentGameType = gameType;
+    this.state.currentCategory = category;
 
     // Refund any active Turbo cards if category is excluded
     if (EXCLUDED_TURBO_GAMES.includes(this.state.currentCategory)) {
@@ -601,39 +641,23 @@ export class LobbyRoom extends Room {
       });
     }
 
-    // Select subset of players
-    const allPlayerIds = Array.from(this.state.players.keys());
-    for (let i = allPlayerIds.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [allPlayerIds[i], allPlayerIds[j]] = [allPlayerIds[j], allPlayerIds[i]];
-    }
-
-    let requiredPlayers = allPlayerIds.length;
-    if (this.state.currentGameType === "1v1") requiredPlayers = 2;
-    if (this.state.currentGameType === "2v2") requiredPlayers = 4;
-
-    // Fallback if not enough players for the drawn game type
-    if (requiredPlayers > allPlayerIds.length) {
-      if (allPlayerIds.length >= 2) {
-        this.state.currentGameType = "1v1";
-        requiredPlayers = 2;
-      } else {
-        this.state.currentGameType = "BR";
-        requiredPlayers = allPlayerIds.length;
-      }
-    }
-
     this.state.selectedPlayers.clear();
-    allPlayerIds.slice(0, requiredPlayers).forEach(id => this.state.selectedPlayers.push(id));
+    contestantIds.slice(0, requiredPlayers).forEach(id => this.state.selectedPlayers.push(id));
 
     this.broadcast("SpinWheelEvent", {
       type: this.state.currentGameType,
       category: this.state.currentCategory,
       selectedPlayers: this.state.selectedPlayers.toArray()
     });
+    return true;
   }
 
-  forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]) {
+  forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]): boolean {
+    const contestantIds = connectedPlayerIds(this.state.players, selectedPlayerIds);
+    if (!hasEnoughConnectedPlayers(this.state.players, contestantIds)) {
+      return false;
+    }
+
     this.isCardLocked = false;
     this.shieldChainCount = 0;
     this.state.phase = "wheel";
@@ -657,13 +681,14 @@ export class LobbyRoom extends Room {
     }
 
     this.state.selectedPlayers.clear();
-    selectedPlayerIds.forEach(id => this.state.selectedPlayers.push(id));
+    contestantIds.forEach(id => this.state.selectedPlayers.push(id));
 
     this.broadcast("SpinWheelEvent", {
       type: this.state.currentGameType,
       category: this.state.currentCategory,
       selectedPlayers: this.state.selectedPlayers.toArray()
     });
+    return true;
   }
 
   startCountdownPhase() {
