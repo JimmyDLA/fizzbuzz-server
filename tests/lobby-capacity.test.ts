@@ -126,12 +126,15 @@ describe("lobby start minimum", () => {
 
     room.state.phase = "chart";
     emit(room, "start_wheel", host);
+    assert.equal(room.state.phase, "chart");
+    assert.equal(host.sent.filter((entry) => entry.type === LOBBY_ERROR_EVENT).length, 1);
+
     emit(room, "dev_start_wheel", host, { type: "BR", category: "Tapping Race", selectedPlayers: ["host"] });
 
     assert.equal(room.state.phase, "chart");
     assert.notEqual(room.state.currentGameType, "BR");
     assert.equal(room.state.selectedPlayers.length, 0);
-    assert.equal(host.sent.filter((entry) => entry.type === LOBBY_ERROR_EVENT).length, 3);
+    assert.equal(host.sent.filter((entry) => entry.type === LOBBY_ERROR_EVENT).length, 2);
   });
 
   it("LOB-006: one connected player plus a cached reconnect seat cannot start", () => {
@@ -227,7 +230,7 @@ describe("lobby start minimum", () => {
     emit(room, "start_wheel", host);
     assert.equal(room.state.phase, "chart");
     assert.equal(room.state.currentGameType, "");
-    assert.deepEqual(lobbyError(host), notEnoughPlayersError());
+    assert.equal(lobbyError(host), undefined);
 
     emit(room, "dev_start_wheel", host, {
       type: "BR",
@@ -237,6 +240,7 @@ describe("lobby start minimum", () => {
     assert.equal(room.state.phase, "chart");
     assert.notEqual(room.state.currentGameType, "BR");
     assert.equal(room.state.selectedPlayers.length, 0);
+    assert.deepEqual(lobbyError(host), notEnoughPlayersError());
   });
 });
 

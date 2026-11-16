@@ -56,24 +56,25 @@ export class LobbyRoom extends Room {
 
     this.onMessage("ready", (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      const canReady = !!player && (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution");
+      const canReady = !!player && (
+        this.state.phase === "lobby" ||
+        this.state.phase === "chart" ||
+        this.state.phase === "wheel" ||
+        this.state.phase === "resolution"
+      );
       if (canReady && player) {
         player.isReady = message.isReady;
       }
-      if (canReady && message?.isReady === true && this.state.phase === "lobby" && !hasEnoughConnectedPlayers(this.state.players)) {
+      const blocksOnFloor = this.state.phase === "lobby" || this.state.phase === "chart";
+      if (canReady && message?.isReady === true && blocksOnFloor && !hasEnoughConnectedPlayers(this.state.players)) {
         client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
       }
       this.checkAllReady();
     });
 
-    this.onMessage("start_wheel", (client) => {
-      const player = this.state.players.get(client.sessionId);
-      if (player && player.isHost && this.state.phase === "chart") {
-        if (!this.startWheelPhase()) {
-          client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
-        }
-      }
-    });
+    // Player-facing host spin is gone. The wheel starts only when every
+    // connected player is ready during chart. Ignore leftover clients.
+    this.onMessage("start_wheel", () => {});
 
     this.onMessage("dev_start_wheel", (client, message) => {
       const player = this.state.players.get(client.sessionId);
@@ -126,7 +127,7 @@ export class LobbyRoom extends Room {
           player.cards.splice(cardIndex, 1);
 
           // Reset ready status for all players
-          this.state.players.forEach(p => p.isReady = false);
+          this.clearReadyFlags();
 
           // Broadcast card announcement to all clients
           this.broadcast("CardUsedEvent", {
@@ -137,11 +138,13 @@ export class LobbyRoom extends Room {
             message: `${player.name} used RESPIN to re-spin the wheel!`
           });
 
-          // Wait 3 seconds for card popup animation, then trigger wheel spin
+          // Wait 3 seconds for card popup animation, then trigger wheel spin.
+          // Ready presses during the lock must not start a second spin or the countdown.
           setTimeout(() => {
             this.startWheelPhase();
             setTimeout(() => {
               this.isCardLocked = false;
+              this.checkAllReady();
             }, 3000);
           }, 3000);
         }
@@ -155,7 +158,7 @@ export class LobbyRoom extends Room {
           const type = message.type || (selectedPlayers.length === 2 ? "1v1" : selectedPlayers.length === 4 ? "2v2" : "BR");
 
           // Reset ready status for all players
-          this.state.players.forEach(p => p.isReady = false);
+          this.clearReadyFlags();
 
           // Broadcast card announcement to all clients
           this.broadcast("CardUsedEvent", {
@@ -166,11 +169,13 @@ export class LobbyRoom extends Room {
             message: `${player.name} played WILD CARD: Game set to ${category}!`
           });
 
-          // Wait 3 seconds for card popup animation, then force wheel state
+          // Wait 3 seconds for card popup animation, then force wheel state.
+          // All-ready must not preempt this play, and the countdown waits until it lands.
           setTimeout(() => {
             this.forceWheelPhase(type, category, selectedPlayers);
             setTimeout(() => {
               this.isCardLocked = false;
+              this.checkAllReady();
             }, 3000);
           }, 3000);
         }
@@ -339,6 +344,8 @@ export class LobbyRoom extends Room {
     }
 
     this.state.players.set(client.sessionId, player);
+    // A joiner is not ready. Re-check so they cannot inherit an all-ready spin.
+    this.checkAllReady();
   }
 
   private abortGameToChart(reason: string) {
@@ -358,6 +365,7 @@ export class LobbyRoom extends Room {
       p.gameData = "{}";
       p.gameScore = 0;
     });
+    this.syncReadyCounts();
     this.state.lastWinners.clear();
     this.state.lastLosers.clear();
     this.state.lastGameResult = "";
@@ -388,6 +396,7 @@ export class LobbyRoom extends Room {
 
     const cardsArray = player.cards.toArray ? player.cards.toArray() : Array.from(player.cards);
     player.isConnected = false;
+    this.syncReadyCounts();
 
     // Check if player was part of the current active game session
     const isMidGame = this.state.phase === "playing" || this.state.phase === "countdown" || this.state.phase === "wheel";
@@ -436,6 +445,7 @@ export class LobbyRoom extends Room {
         await this.allowReconnection(client, 120);
         console.log(client.sessionId, "successfully reconnected!");
         player.isConnected = true;
+        this.checkAllReady();
       } catch (e) {
         console.log(client.sessionId, "grace period expired!");
         // Save stats to cache
@@ -538,9 +548,31 @@ export class LobbyRoom extends Room {
     if (wasHost && this.state.players.size > 0) {
       this.ensureConnectedHost();
     }
+    this.syncReadyCounts();
+  }
+
+  /** Connected ready players over connected players. Disconnected seats are omitted. */
+  private syncReadyCounts() {
+    let readyCount = 0;
+    let connectedCount = 0;
+    this.state.players.forEach((player) => {
+      if (!player.isConnected) return;
+      connectedCount += 1;
+      if (player.isReady) readyCount += 1;
+    });
+    this.state.readyCount = readyCount;
+    this.state.connectedCount = connectedCount;
+  }
+
+  private clearReadyFlags() {
+    this.state.players.forEach((player) => {
+      player.isReady = false;
+    });
+    this.syncReadyCounts();
   }
 
   checkAllReady() {
+    this.syncReadyCounts();
     if (this.clients.length < 1) return;
     let allReady = true;
 
@@ -557,7 +589,7 @@ export class LobbyRoom extends Room {
       });
       if (connectedSelectedCount === 0) allReady = false;
     } else {
-      // Everyone connected must be ready
+      // Lobby and chart: every connected player must be ready. Disconnected seats do not block.
       let connectedCount = 0;
       this.state.players.forEach((player: Player) => {
         if (player.isConnected) {
@@ -573,13 +605,20 @@ export class LobbyRoom extends Room {
         if (!hasEnoughConnectedPlayers(this.state.players)) {
           return;
         }
-        this.state.players.forEach(p => p.isReady = false);
+        this.clearReadyFlags();
         this.state.phase = "chart";
+      } else if (this.state.phase === "chart") {
+        // No timer and no host override. A card play in flight keeps the Wild Card window.
+        if (this.isCardLocked || !hasEnoughConnectedPlayers(this.state.players)) {
+          return;
+        }
+        this.startWheelPhase();
       } else if (this.state.phase === "wheel") {
-        this.state.players.forEach(p => p.isReady = false);
+        if (this.isCardLocked) return;
+        this.clearReadyFlags();
         this.startCountdownPhase();
       } else if (this.state.phase === "resolution") {
-        this.state.players.forEach(p => p.isReady = false);
+        this.clearReadyFlags();
         this.state.phase = "chart";
       }
     }
@@ -621,6 +660,8 @@ export class LobbyRoom extends Room {
 
     this.isCardLocked = false;
     this.shieldChainCount = 0;
+    // Chart readiness must not carry into the post-wheel Ready to Play step.
+    this.clearReadyFlags();
     this.state.phase = "wheel";
     this.state.currentGameType = gameType;
     this.state.currentCategory = category;
@@ -660,6 +701,8 @@ export class LobbyRoom extends Room {
 
     this.isCardLocked = false;
     this.shieldChainCount = 0;
+    // A Wild Card or dev spin also opens a fresh Ready to Play step.
+    this.clearReadyFlags();
     this.state.phase = "wheel";
     this.state.currentGameType = type;
     this.state.currentCategory = category;

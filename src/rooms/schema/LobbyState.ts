@@ -3,7 +3,7 @@ import { Schema, type, MapSchema, ArraySchema } from "@colyseus/schema";
 export class Player extends Schema {
   @type("string") id: string = "";
   @type("string") name: string = "";
-  @type("boolean") isReady: boolean = false;
+  @type("boolean") isReady: boolean = false; // Lobby, chart (Ready to Spin), wheel, and resolution toggle
   @type("boolean") isHost: boolean = false;
   @type("number") score: number = 5;
   @type("number") drinks: number = 0;
@@ -25,4 +25,8 @@ export class LobbyState extends Schema {
   @type(["string"]) lastLosers = new ArraySchema<string>();
   @type("string") lastGameResult: string = "";
   @type("number") roundCount: number = 0;
+  /** Connected players with isReady. Chart shows readyCount/connectedCount. */
+  @type("number") readyCount: number = 0;
+  /** Connected players. Disconnected seats are excluded from the ready count. */
+  @type("number") connectedCount: number = 0;
 }
