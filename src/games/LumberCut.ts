@@ -171,10 +171,17 @@ export class LumberCut implements IMiniGame {
       leaderboard
     });
 
+    const actionScores: Record<string, number> = {};
+    connectedSelectedIds.forEach(id => {
+      const team = (gameData.teams || []).find((t: any) => t.members.includes(id));
+      actionScores[id] = team && typeof team.pairs === "number" ? team.pairs : 0;
+    });
+
     return {
       winners: state.lastWinners.toArray(),
       losers: state.lastLosers.toArray(),
       tiedIds,
+      actionScores,
     };
   }
 }

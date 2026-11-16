@@ -77,9 +77,11 @@ export interface PayoutShare {
 }
 
 /**
- * No winner means there is no placement to pay. That is the no-action outcome
- * (nobody scored, so everyone loses) and also an RPS tie, which reports no winner.
- * The pot is returned as each player's own wager. Drinks still apply.
+ * No winner means there is no placement to pay, so the pot is refunded.
+ * `applyNoActionRound` has already turned an all-zero `actionScores` report
+ * into this shape (Lumber Cut with no finished cut, Turbo on a blank board).
+ * A game that already reports no winners (a zero board, a Simon Says round-0
+ * timeout, an RPS tie) refunds the same way. Drinks still apply.
  */
 export function isNoActionResult(result: GameResult): boolean {
   return result.winners.length === 0;

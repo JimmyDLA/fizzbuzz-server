@@ -1,6 +1,6 @@
 import { Room, Client, CloseCode, ServerError } from "@colyseus/core";
 import { LobbyState, Player, PodiumEntry } from "./schema/LobbyState";
-import { IMiniGame } from "../games/IMiniGame";
+import { GameResult, IMiniGame } from "../games/IMiniGame";
 import { TappingRace } from "../games/TappingRace";
 import { MathProblem } from "../games/MathProblem";
 import { HotPotato } from "../games/HotPotato";
@@ -13,7 +13,7 @@ import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
-import { applyDoublePoints, applyDrinks, applyStandardScoring } from "./scoring";
+import { applyDoublePoints, applyDrinks, applyNoActionRound, applyStandardScoring } from "./scoring";
 import {
   BETTING_PAYOUT_EVENT,
   BETTING_ROUND_EVENT,
@@ -1175,15 +1175,18 @@ export class LobbyRoom extends Room {
 
   /**
    * Pay the pot from the mini-game's placement, or return every wager when
-   * nobody won. Drinks always apply. There is no +3.
+   * nobody acted. `applyNoActionRound` drops a reported win when every
+   * action score is 0, including Lumber Cut at 0 pairs and a Turbo point on
+   * a blank Math or Trivia board. Drinks still apply. There is no +3.
    */
-  private settleBetting(result: { winners: string[]; losers: string[]; tiedIds: string[] }): void {
+  private settleBetting(result: GameResult): void {
     if (this.bettingSettled) return;
     this.bettingSettled = true;
-    applyDrinks(this.state, result);
+    const resolved = applyNoActionRound(this.state, result);
+    applyDrinks(this.state, resolved);
 
     const stillHere = this.bettingPlayerIds.filter((id) => this.state.players.has(id));
-    if (isNoActionResult(result)) {
+    if (isNoActionResult(resolved)) {
       const payouts: BettingPayoutView[] = [];
       for (const id of stillHere) {
         const player = this.state.players.get(id);
@@ -1206,7 +1209,7 @@ export class LobbyRoom extends Room {
       return;
     }
 
-    const placements = standingsForPlayers(stillHere, result, this.state.lastGameResult);
+    const placements = standingsForPlayers(stillHere, resolved, this.state.lastGameResult);
     const shares = splitPot(placements, this.state.bettingPot);
     const payouts: BettingPayoutView[] = [];
     for (const share of shares) {

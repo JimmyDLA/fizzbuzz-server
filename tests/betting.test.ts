@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CloseCode, type Client } from "@colyseus/core";
 import { HotPotato } from "../src/games/HotPotato";
+import { LumberCut } from "../src/games/LumberCut";
+import { MathProblem } from "../src/games/MathProblem";
 import { ScreenPainting } from "../src/games/ScreenPainting";
+import { SimonSays } from "../src/games/SimonSays";
 import { TappingRace } from "../src/games/TappingRace";
+import { Trivia } from "../src/games/Trivia";
+import { client } from "./helpers";
 import {
   BETTING_PAYOUT_EVENT,
   BETTING_ROUND_EVENT,
@@ -519,6 +524,109 @@ describe("betting round resolution", () => {
     assert.equal(room.state.players.get("bea")?.drinks, 1);
     assert.equal(events(broadcasts, BETTING_ROUND_EVENT).length, 0);
     assert.equal(events(broadcasts, BETTING_PAYOUT_EVENT).length, 0);
+  });
+});
+
+function assertNoActionRefund(
+  room: LobbyRoom,
+  broadcasts: Broadcast[],
+  startingScores: Record<string, number>,
+): void {
+  const paid = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
+  assert.equal(paid.length, 1);
+  assert.equal(paid[0].reason, "no-action");
+  assert.equal(paid[0].refunded, true);
+  assert.equal(room.state.bettingRefunded, true);
+  assert.deepEqual(room.state.lastWinners.toArray(), []);
+  for (const [id, score] of Object.entries(startingScores)) {
+    const player = room.state.players.get(id)!;
+    assert.equal(player.score, score, `${id} gets their own wager back`);
+    assert.equal(player.betPayout, player.betWager, id);
+    assert.equal(player.betNet, 0, id);
+    assert.equal(player.betRank, 0, id);
+    assert.equal(player.drinks, 1, id);
+  }
+  assert.deepEqual(
+    paid[0].payouts.map((entry) => entry.payout).sort((a, b) => a - b),
+    Object.keys(startingScores).map((id) => room.state.players.get(id)!.betWager).sort((a, b) => a - b),
+  );
+}
+
+describe("no-action betting refunds", () => {
+  it("refunds a Lumber Cut where nobody cut", () => {
+    const { room, broadcasts } = bootRoom();
+    addPlayer(room, "ada", { score: 9, host: true });
+    addPlayer(room, "bea", { score: 1 });
+    room.state.roundCount = 5;
+    assert.equal(room.startWheelPhase(), true);
+    const game = new LumberCut();
+    game.onInit(room.state);
+    room.activeGame = game;
+    room.applyActiveGameResult();
+
+    assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1 });
+    const data = JSON.parse(room.state.players.get(room.state.selectedPlayers[0])!.gameData);
+    assert.equal(data.teams.every((team: { pairs: number }) => team.pairs === 0), true);
+  });
+
+  it("refunds a Lumber Cut where the only pull never finishes a pair", () => {
+    const { room, broadcasts } = bootRoom();
+    addPlayer(room, "ada", { score: 9, host: true });
+    addPlayer(room, "bea", { score: 1 });
+    room.state.roundCount = 5;
+    assert.equal(room.startWheelPhase(), true);
+    const game = new LumberCut();
+    game.onInit(room.state);
+    const puller = room.state.selectedPlayers[0];
+    game.onMessage(client(puller), { action: "pull", side: "left" }, room.state);
+    room.activeGame = game;
+    room.applyActiveGameResult();
+
+    assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1 });
+    const data = JSON.parse(room.state.players.get(puller)!.gameData);
+    assert.equal(data.teams.every((team: { pairs: number }) => team.pairs === 0), true);
+  });
+
+  it("refunds a Turbo point on a blank Math or Trivia board", () => {
+    for (const Game of [MathProblem, Trivia]) {
+      const { room, broadcasts } = bootRoom();
+      addPlayer(room, "ada", { score: 9, host: true });
+      addPlayer(room, "bea", { score: 1 });
+      room.state.players.get("ada")!.activeEffects = JSON.stringify({ turbo: true });
+      room.state.roundCount = 5;
+      assert.equal(room.startWheelPhase(), true);
+      room.activeGame = new Game();
+      room.applyActiveGameResult();
+
+      assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1 });
+      assert.equal(room.state.players.get("ada")?.gameScore, 0);
+      assert.equal(room.state.players.get("bea")?.gameScore, 0);
+    }
+  });
+
+  it("refunds a Simon Says timeout at round 0", () => {
+    const { room, broadcasts } = bootRoom();
+    addPlayer(room, "ada", { score: 9, host: true });
+    addPlayer(room, "bea", { score: 1 });
+    addPlayer(room, "cal", { score: 4 });
+    room.state.roundCount = 5;
+    assert.equal(room.startWheelPhase(), true);
+    const ids = room.state.selectedPlayers.toArray();
+    const script = JSON.stringify({
+      winners: [],
+      activePlayers: ids,
+      currentRound: 1,
+    });
+    for (const id of ids) {
+      const player = room.state.players.get(id)!;
+      player.gameData = script;
+      player.gameScore = 0;
+    }
+    room.activeGame = new SimonSays();
+    room.applyActiveGameResult();
+
+    assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1, cal: 4 });
+    assert.deepEqual(room.state.lastLosers.toArray().slice().sort(), ["ada", "bea", "cal"]);
   });
 });
 
