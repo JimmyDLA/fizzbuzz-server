@@ -1,4 +1,4 @@
-import { Room, Client, ServerError } from "@colyseus/core";
+import { Room, Client, CloseCode, ServerError } from "@colyseus/core";
 import { LobbyState, Player } from "./schema/LobbyState";
 import { IMiniGame } from "../games/IMiniGame";
 import { TappingRace } from "../games/TappingRace";
@@ -21,6 +21,9 @@ const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
 const EXCLUDED_TURBO_GAMES = ["Hot Potato", "Rock Paper Scissors", "Simon Says"];
 
+/** How long an abnormal disconnect keeps its roster seat. */
+export const RECONNECT_GRACE_SECONDS = 120;
+
 export class LobbyRoom extends Room {
   state!: LobbyState;
   maxClients = MAX_ROOM_PLAYERS;
@@ -29,6 +32,8 @@ export class LobbyRoom extends Room {
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
   private isCardLocked: boolean = false;
   private shieldChainCount: number = 0;
+  /** Session ids inside the reconnect grace window. They hold a seat until they return or the window ends. */
+  private graceSessionIds = new Set<string>();
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -382,7 +387,27 @@ export class LobbyRoom extends Room {
     }
   }
 
-  async onLeave(client: Client, consented?: any) {
+  /**
+   * Live sockets plus seat reservations. A reconnect-grace reservation is included,
+   * so a full room stays full until that player returns or the grace window ends.
+   */
+  heldSeatCount(): number {
+    const reservedIds = new Set(Object.keys(
+      (this as unknown as { _reservedSeats?: Record<string, unknown> })._reservedSeats ?? {},
+    ));
+    let unreservedGrace = 0;
+    for (const sessionId of this.graceSessionIds) {
+      const stillSeated = this.clients.some((connected) => connected.sessionId === sessionId);
+      if (!stillSeated && !reservedIds.has(sessionId)) unreservedGrace += 1;
+    }
+    return this.clients.length + reservedIds.size + unreservedGrace;
+  }
+
+  isAtSeatCapacity(): boolean {
+    return this.heldSeatCount() >= MAX_ROOM_PLAYERS;
+  }
+
+  async onLeave(client: Client, code?: number) {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
@@ -420,7 +445,7 @@ export class LobbyRoom extends Room {
 
     this.ensureConnectedHost();
 
-    if (consented) {
+    if (code === CloseCode.CONSENTED) {
       console.log(client.sessionId, "consented leave.");
       // Save stats to cache
       this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
@@ -431,9 +456,12 @@ export class LobbyRoom extends Room {
       });
       this.removePlayer(client.sessionId);
     } else {
+      // Hold the seat for the whole grace window, including the moment before
+      // Colyseus records the reconnection reservation.
+      this.graceSessionIds.add(client.sessionId);
       console.log(client.sessionId, "abnormal leave! Waiting 120s...");
       try {
-        await this.allowReconnection(client, 120);
+        await this.allowReconnection(client, RECONNECT_GRACE_SECONDS);
         console.log(client.sessionId, "successfully reconnected!");
         player.isConnected = true;
       } catch (e) {
@@ -446,6 +474,8 @@ export class LobbyRoom extends Room {
           activeEffects: player.activeEffects || "{}"
         });
         this.removePlayer(client.sessionId);
+      } finally {
+        this.graceSessionIds.delete(client.sessionId);
       }
     }
   }
