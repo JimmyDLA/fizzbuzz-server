@@ -446,7 +446,7 @@ describe("hand cap, auto-discard, and reconnect", () => {
     assert.deepEqual(rounds(restored), [4, 8]);
   });
 
-  it("drops the newest cached card's earnedRound with that card", () => {
+  it("drops the oldest cached card and keeps the new card's earnedRound", () => {
     const room = setup();
     (room as unknown as {
       disconnectedPlayersCache: Map<string, {
@@ -469,8 +469,32 @@ describe("hand cap, auto-discard, and reconnect", () => {
     room.onJoin(client("ada-2"), { name: "Ada" });
     const restored = room.state.players.get("ada-2");
     assert.ok(restored);
-    assert.deepEqual(hand(restored), ["MID", "OLD"]);
-    assert.deepEqual(rounds(restored), [4, 2]);
+    assert.deepEqual(hand(restored), ["NEW", "MID"]);
+    assert.deepEqual(rounds(restored), [9, 4]);
+    assert.equal(rounds(restored).length, hand(restored).length);
+  });
+
+  it("drops the oldest card on disconnect and keeps the new card's earnedRound", async () => {
+    const room = setup();
+    const { player } = addPlayer(room, "ada", "Ada", true);
+    room.state.phase = "resolution";
+    room.state.roundCount = 2;
+    award(room, "ada", "SHIELD");
+    room.state.roundCount = 4;
+    award(room, "ada", "RESPIN");
+    room.state.roundCount = 5;
+    award(room, "ada", "TURBO");
+    assert.equal(player.pendingDiscard, true);
+    assert.deepEqual(rounds(player), [2, 4, 5]);
+
+    await room.onLeave(client("ada"), true);
+    room.onJoin(client("ada-2"), { name: "Ada" });
+    const restored = room.state.players.get("ada-2");
+    assert.ok(restored);
+    assert.deepEqual(hand(restored), ["RESPIN", "TURBO"]);
+    assert.deepEqual(rounds(restored), [4, 5]);
+    assert.equal(rounds(restored).length, hand(restored).length);
+    assert.equal(restored.pendingDiscard, false);
   });
 });
 
