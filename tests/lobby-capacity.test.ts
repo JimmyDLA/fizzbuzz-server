@@ -77,6 +77,21 @@ function lobbyError(client: FakeClient) {
   return client.sent.find((entry) => entry.type === LOBBY_ERROR_EVENT)?.payload;
 }
 
+function withDevWheel(fn: () => void): void {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousFlag = process.env.ALLOW_DEV_TOOLS;
+  process.env.NODE_ENV = "test";
+  process.env.ALLOW_DEV_TOOLS = "1";
+  try {
+    fn();
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousFlag === undefined) delete process.env.ALLOW_DEV_TOOLS;
+    else process.env.ALLOW_DEV_TOOLS = previousFlag;
+  }
+}
+
 describe("connected player start gate", () => {
   it("counts only connected players and requires two of them", () => {
     const players = {
@@ -127,12 +142,17 @@ describe("lobby start minimum", () => {
 
     room.state.phase = "chart";
     emit(room, "start_wheel", host);
-    emit(room, "dev_start_wheel", host, { type: "BR", category: "Tapping Race", selectedPlayers: ["host"] });
+    assert.equal(room.state.phase, "chart");
+    assert.equal(host.sent.filter((entry) => entry.type === LOBBY_ERROR_EVENT).length, 1);
+
+    withDevWheel(() => {
+      emit(room, "dev_start_wheel", host, { type: "BR", category: "Tapping Race", selectedPlayers: ["host"] });
+    });
 
     assert.equal(room.state.phase, "chart");
     assert.notEqual(room.state.currentGameType, "BR");
     assert.equal(room.state.selectedPlayers.length, 0);
-    assert.equal(host.sent.filter((entry) => entry.type === LOBBY_ERROR_EVENT).length, 3);
+    assert.equal(host.sent.filter((entry) => entry.type === LOBBY_ERROR_EVENT).length, 2);
   });
 
   it("LOB-006: one connected player plus a cached reconnect seat cannot start", () => {
@@ -228,16 +248,19 @@ describe("lobby start minimum", () => {
     emit(room, "start_wheel", host);
     assert.equal(room.state.phase, "chart");
     assert.equal(room.state.currentGameType, "");
-    assert.deepEqual(lobbyError(host), notEnoughPlayersError());
+    assert.equal(lobbyError(host), undefined);
 
-    emit(room, "dev_start_wheel", host, {
-      type: "BR",
-      category: "Tapping Race",
-      selectedPlayers: ["host", "guest"],
+    withDevWheel(() => {
+      emit(room, "dev_start_wheel", host, {
+        type: "BR",
+        category: "Tapping Race",
+        selectedPlayers: ["host", "guest"],
+      });
     });
     assert.equal(room.state.phase, "chart");
     assert.notEqual(room.state.currentGameType, "BR");
     assert.equal(room.state.selectedPlayers.length, 0);
+    assert.deepEqual(lobbyError(host), notEnoughPlayersError());
   });
 });
 
@@ -457,7 +480,7 @@ describe("LOB-005 room cap", () => {
       emitRoom(room(), "start_wheel", hostId);
       assert.equal(room().state.phase, "chart");
       emitRoom(room(), "start_wheel", nextId);
-      assert.equal(room().state.phase, "wheel");
+      assert.equal(room().state.phase, "chart");
     } finally {
       await releaseLobby({ roomId, room: room(), seats, sockets: sockets as unknown as WebSocket[] });
     }
@@ -501,7 +524,7 @@ describe("LOB-005 room cap", () => {
       emitRoom(party.room, "start_wheel", cId);
       assert.equal(party.room.state.phase, "chart");
       emitRoom(party.room, "start_wheel", party.actors.A.sessionId);
-      assert.equal(party.room.state.phase, "wheel");
+      assert.equal(party.room.state.phase, "chart");
     } finally {
       await releaseLobby({ roomId: party.roomId, room: party.room, seats: [], sockets: party.sockets as unknown as WebSocket[] });
     }

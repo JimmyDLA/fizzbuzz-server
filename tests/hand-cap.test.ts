@@ -7,6 +7,10 @@ import { LobbyRoom, HAND_CAP, PENDING_DISCARD_MS } from "../src/rooms/LobbyRoom"
 import { Player } from "../src/rooms/schema/LobbyState";
 import { client } from "./helpers";
 
+// dev_award_card is host-only and off unless this flag is set in development or test.
+process.env.NODE_ENV = "test";
+process.env.ALLOW_DEV_TOOLS = "1";
+
 /**
  * CRD-005, CRD-012, CRD-016. The server allows one temporary third card.
  * The player picks which card to drop. With no pick — 15s timeout, disconnect,
