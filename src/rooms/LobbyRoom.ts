@@ -1,5 +1,5 @@
-import { Room, Client, ServerError } from "@colyseus/core";
-import { LobbyState, Player } from "./schema/LobbyState";
+import { CloseCode, Room, Client, ServerError } from "@colyseus/core";
+import { DrinkChain, LobbyState, Player } from "./schema/LobbyState";
 import { IMiniGame } from "../games/IMiniGame";
 import { TappingRace } from "../games/TappingRace";
 import { MathProblem } from "../games/MathProblem";
@@ -21,6 +21,29 @@ const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
 const EXCLUDED_TURBO_GAMES = ["Hot Potato", "Rock Paper Scissors", "Simon Says"];
 
+/**
+ * Next pass for one chain. The round has no global running total.
+ * An untouched chain sends the drinks it currently holds.
+ * After that chain has been deflected, the next pass is those drinks plus 1. No cap.
+ * Another chain does not change this number. Totals add only when both chains sit on the same holder.
+ */
+export function shieldDrinksToPass(drinks: number, deflections: number): number {
+  return deflections <= 0 ? drinks : drinks + 1;
+}
+
+/**
+ * How long resolution keeps waiting on a Shield target who is disconnected but still seated.
+ * This is the decision window, not the 120s reconnect grace. Jimmy can overrule the length (CRD-017).
+ */
+export const SHIELD_DECISION_MS = 15_000;
+
+export interface ShieldPassResult {
+  /** Merged amount this deflection passed. Same value as CardUsedEvent.drinksToPass. */
+  drinksToPass: number;
+  holderId: string;
+  deflections: number;
+}
+
 /** A hand may hold two cards. One extra card is temporary so the player can choose what to drop. */
 export const HAND_CAP = 2;
 /** Window before the server discards the card the player has held the longest. */
@@ -37,7 +60,9 @@ export class LobbyRoom extends Room {
   private nextAcquiredAt = 1;
   private pendingDiscardTimers = new Map<string, { clear(): void }>();
   private isCardLocked: boolean = false;
-  private shieldChainCount: number = 0;
+  /** Deadlines for disconnected seated Shield targets. Cleared when they act, the window ends, or the seat is removed. */
+  private shieldHold = new Map<string, { deadline: number; acted: boolean }>();
+  private shieldHoldTimer: ReturnType<typeof setTimeout> | null = null;
   /** Code held until the room is disposed, including the gap before the matchmaker lists it. */
   private claimedRoomCode: string | null = null;
 
@@ -70,6 +95,9 @@ export class LobbyRoom extends Room {
       if (!player) return;
       if (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution") {
         player.isReady = message.isReady;
+        if (message?.isReady && player.isConnected) {
+          this.markShieldHoldActed(client.sessionId);
+        }
       }
       // Remember the press, but do not leave the phase until the extra card is gone.
       if (this.handBlocksActions(player)) return;
@@ -225,48 +253,7 @@ export class LobbyRoom extends Room {
           });
         }
       } else if (cardId === "SHIELD") {
-        if (this.state.phase === "resolution") {
-          const targetPlayerId = message.targetPlayerId;
-          const targetPlayer = this.state.players.get(targetPlayerId);
-          const currentDrinks = this.state.lastLosers.filter(id => id === client.sessionId).length;
-
-          // Prevent shielding self
-          if (currentDrinks > 0 && targetPlayer && targetPlayerId !== client.sessionId) {
-            this.removeCardAt(player, cardIndex);
-            this.shieldChainCount += 1;
-
-            // Remove all occurrences of user from lastLosers
-            while (this.state.lastLosers.indexOf(client.sessionId) !== -1) {
-              const idx = this.state.lastLosers.indexOf(client.sessionId);
-              this.state.lastLosers.splice(idx, 1);
-            }
-
-            // Deduct currentDrinks from player drinks counter
-            player.drinks = Math.max(0, player.drinks - currentDrinks);
-
-            // Escalate drinks penalty: 1st shield passes currentDrinks (e.g. 1), subsequent chained shields increment by +1 (2x, 3x, 4x, 5x...)
-            const drinksToPass = this.shieldChainCount === 1 ? currentDrinks : currentDrinks + 1;
-
-            // Add escalated drinks to target player
-            targetPlayer.drinks += drinksToPass;
-
-            // Pass all escalated drinks to target player in lastLosers
-            for (let i = 0; i < drinksToPass; i++) {
-              this.state.lastLosers.push(targetPlayerId);
-            }
-
-            const drinkStr = drinksToPass > 1 ? `${drinksToPass} drinks` : "the drink";
-            this.broadcast("CardUsedEvent", {
-              userId: client.sessionId,
-              playerName: player.name,
-              cardId: "SHIELD",
-              targetName: targetPlayer.name,
-              drinkCount: drinksToPass,
-              description: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`,
-              message: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`
-            });
-          }
-        }
+        this.applyShield(client.sessionId, message.targetPlayerId);
       }
     });
 
@@ -378,6 +365,130 @@ export class LobbyRoom extends Room {
     this.state.players.set(client.sessionId, player);
   }
 
+  /**
+   * Pass this player's drink total. Escalation stays on this chain.
+   * A second chain elsewhere in the round does not add a drink.
+   * A target who already holds a chain keeps one total: the passed amount is added to it.
+   * Any other player is a legal target, including a 2v2 teammate and the player who just passed.
+   * The shielder cannot target themselves.
+   * Returns null, and does not consume the card, when the play is rejected.
+   */
+  applyShield(sessionId: string, targetPlayerId: string): ShieldPassResult | null {
+    if (this.state.phase !== "resolution") return null;
+
+    const player = this.state.players.get(sessionId);
+    const targetPlayer = targetPlayerId ? this.state.players.get(targetPlayerId) : undefined;
+    if (!player || !targetPlayer || targetPlayerId === sessionId) return null;
+
+    const cardIndex = player.cards.indexOf("SHIELD");
+    if (cardIndex === -1) return null;
+
+    const chain = this.state.drinkChains.get(sessionId);
+    if (!chain || chain.drinks <= 0) return null;
+
+    const drinksToPass = shieldDrinksToPass(chain.drinks, chain.deflections);
+    const heldDrinks = chain.drinks;
+    const passedDeflections = chain.deflections + 1;
+
+    this.removeCardAt(player, cardIndex);
+    player.drinks = Math.max(0, player.drinks - heldDrinks);
+    targetPlayer.drinks += drinksToPass;
+
+    const targetChain = this.state.drinkChains.get(targetPlayerId);
+    const mergedDrinks = targetChain ? targetChain.drinks + drinksToPass : drinksToPass;
+    const mergedDeflections = targetChain
+      ? Math.max(targetChain.deflections, passedDeflections)
+      : passedDeflections;
+
+    this.state.drinkChains.delete(sessionId);
+    const merged = this.writeDrinkChain(targetPlayerId, mergedDrinks, mergedDeflections);
+    this.syncLastLosersFromChains();
+
+    const drinkStr = drinksToPass > 1 ? `${drinksToPass} drinks` : "the drink";
+    this.broadcast("CardUsedEvent", {
+      userId: sessionId,
+      playerName: player.name,
+      cardId: "SHIELD",
+      targetName: targetPlayer.name,
+      targetPlayerId,
+      drinkCount: drinksToPass,
+      drinksToPass,
+      deflections: merged.deflections,
+      description: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`,
+      message: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`
+    });
+
+    this.markShieldHoldActed(sessionId);
+    this.checkAllReady();
+
+    return {
+      drinksToPass,
+      holderId: targetPlayerId,
+      deflections: merged.deflections,
+    };
+  }
+
+  /** One merged total per player already in lastLosers. Amount is their current count, usually 1. */
+  private seedDrinkChains() {
+    const counts = new Map<string, number>();
+    const order: string[] = [];
+    for (const id of this.state.lastLosers.toArray()) {
+      if (!counts.has(id)) order.push(id);
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+
+    this.state.drinkChains.clear();
+    for (const holderId of order) {
+      this.writeDrinkChain(holderId, counts.get(holderId) ?? 0, 0);
+    }
+    this.syncLastLosersFromChains();
+  }
+
+  private writeDrinkChain(holderId: string, drinks: number, deflections: number): DrinkChain {
+    let chain = this.state.drinkChains.get(holderId);
+    if (!chain) {
+      chain = new DrinkChain();
+      chain.id = holderId;
+      chain.holderId = holderId;
+      this.state.drinkChains.set(holderId, chain);
+    }
+    chain.drinks = drinks;
+    chain.deflections = deflections;
+    chain.drinksToPass = shieldDrinksToPass(drinks, deflections);
+    return chain;
+  }
+
+  private syncLastLosersFromChains() {
+    this.state.lastLosers.clear();
+    this.state.drinkChains.forEach((chain) => {
+      for (let i = 0; i < chain.drinks; i++) {
+        this.state.lastLosers.push(chain.holderId);
+      }
+    });
+  }
+
+  private clearDrinkChains() {
+    this.state.drinkChains.clear();
+  }
+
+  /**
+   * Drop this holder's drink total when their seat is deleted.
+   * Called from removePlayer only. A disconnect that still holds the seat,
+   * including the 120s reconnect grace, keeps the chain.
+   */
+  private dropDrinkChain(sessionId: string) {
+    let removed = this.state.drinkChains.delete(sessionId);
+    const staleIds: string[] = [];
+    this.state.drinkChains.forEach((chain, id) => {
+      if (chain.holderId === sessionId) staleIds.push(id);
+    });
+    for (const id of staleIds) {
+      this.state.drinkChains.delete(id);
+      removed = true;
+    }
+    if (removed) this.syncLastLosersFromChains();
+  }
+
   private abortGameToChart(reason: string) {
     console.log(`[AbortGame] Aborting game to chart. Reason: ${reason}`);
     if (this.gameLoopInterval) {
@@ -386,7 +497,8 @@ export class LobbyRoom extends Room {
     }
     this.activeGame = null;
     this.isCardLocked = false;
-    this.shieldChainCount = 0;
+    this.clearDrinkChains();
+    this.clearShieldHolds();
     this.state.phase = "chart";
     this.state.timer = 0;
     this.state.selectedPlayers.clear();
@@ -419,7 +531,7 @@ export class LobbyRoom extends Room {
     }
   }
 
-  async onLeave(client: Client, consented?: any) {
+  async onLeave(client: Client, code?: number) {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
@@ -460,7 +572,7 @@ export class LobbyRoom extends Room {
 
     this.ensureConnectedHost();
 
-    if (consented) {
+    if (code === CloseCode.CONSENTED) {
       console.log(client.sessionId, "consented leave.");
       // Save stats to cache
       this.disconnectedPlayersCache.set(player.name.toLowerCase(), {
@@ -670,6 +782,7 @@ export class LobbyRoom extends Room {
     this.clearPendingDiscardTimer(sessionId);
     this.cardAcquiredAt.delete(sessionId);
     const wasHost = this.state.players.get(sessionId)?.isHost;
+    this.dropDrinkChain(sessionId);
     this.state.players.delete(sessionId);
 
     const idx = this.state.selectedPlayers.indexOf(sessionId);
@@ -680,6 +793,8 @@ export class LobbyRoom extends Room {
     if (wasHost && this.state.players.size > 0) {
       this.ensureConnectedHost();
     }
+    this.shieldHold.delete(sessionId);
+    this.checkAllReady();
   }
 
   checkAllReady() {
@@ -698,6 +813,11 @@ export class LobbyRoom extends Room {
         }
       });
       if (connectedSelectedCount === 0) allReady = false;
+      // A Shield target who dropped but still has a seat (reconnect grace) keeps
+      // resolution open for the decision window. Ready from everyone else does not skip it.
+      if (this.state.phase === "resolution" && this.shieldHoldBlocksResolution()) {
+        allReady = false;
+      }
     } else {
       // Everyone connected must be ready
       let connectedCount = 0;
@@ -720,13 +840,87 @@ export class LobbyRoom extends Room {
       } else if (this.state.phase === "resolution") {
         this.state.players.forEach(p => p.isReady = false);
         this.state.phase = "chart";
+        this.clearShieldHolds();
       }
+    }
+  }
+
+  /**
+   * Current drink holders who still have a Shield and can deflect.
+   * A disconnected one who is still in `players` is seated (grace). Removing the seat ends the hold.
+   */
+  private currentShieldTargets(): string[] {
+    const ids: string[] = [];
+    this.state.drinkChains.forEach((chain) => {
+      const player = this.state.players.get(chain.holderId);
+      if (!player || chain.drinks <= 0) return;
+      if (player.cards.indexOf("SHIELD") === -1) return;
+      ids.push(chain.holderId);
+    });
+    return ids;
+  }
+
+  private shieldHoldBlocksResolution(): boolean {
+    const now = Date.now();
+    const targets = new Set(this.currentShieldTargets());
+    for (const id of [...this.shieldHold.keys()]) {
+      if (!this.state.players.has(id) || !targets.has(id)) this.shieldHold.delete(id);
+    }
+    for (const id of targets) {
+      const player = this.state.players.get(id);
+      if (!player || player.isConnected) continue;
+      if (!this.shieldHold.has(id)) {
+        this.shieldHold.set(id, { deadline: now + SHIELD_DECISION_MS, acted: false });
+      }
+    }
+
+    let blocking = false;
+    for (const [id, hold] of this.shieldHold) {
+      const player = this.state.players.get(id);
+      if (!player || !targets.has(id)) continue;
+      if (player.isConnected && player.isReady) hold.acted = true;
+      if (hold.acted || now >= hold.deadline) continue;
+      blocking = true;
+    }
+    if (blocking) this.armShieldHoldTimer();
+    else if (this.shieldHoldTimer) {
+      clearTimeout(this.shieldHoldTimer);
+      this.shieldHoldTimer = null;
+    }
+    return blocking;
+  }
+
+  private markShieldHoldActed(sessionId: string) {
+    const hold = this.shieldHold.get(sessionId);
+    if (hold) hold.acted = true;
+  }
+
+  private armShieldHoldTimer() {
+    let soonest = Infinity;
+    for (const hold of this.shieldHold.values()) {
+      if (!hold.acted && hold.deadline < soonest) soonest = hold.deadline;
+    }
+    if (!Number.isFinite(soonest)) return;
+    if (this.shieldHoldTimer) clearTimeout(this.shieldHoldTimer);
+    const delay = Math.max(0, soonest - Date.now());
+    this.shieldHoldTimer = setTimeout(() => {
+      this.shieldHoldTimer = null;
+      this.checkAllReady();
+    }, delay);
+  }
+
+  private clearShieldHolds() {
+    this.shieldHold.clear();
+    if (this.shieldHoldTimer) {
+      clearTimeout(this.shieldHoldTimer);
+      this.shieldHoldTimer = null;
     }
   }
 
   startWheelPhase() {
     this.isCardLocked = false;
-    this.shieldChainCount = 0;
+    this.clearDrinkChains();
+    this.clearShieldHolds();
     this.state.phase = "wheel";
     this.state.currentGameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
     this.state.currentCategory = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
@@ -788,7 +982,8 @@ export class LobbyRoom extends Room {
 
   forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]) {
     this.isCardLocked = false;
-    this.shieldChainCount = 0;
+    this.clearDrinkChains();
+    this.clearShieldHolds();
     this.state.phase = "wheel";
     this.state.currentGameType = type;
     this.state.currentCategory = category;
@@ -933,7 +1128,7 @@ export class LobbyRoom extends Room {
 
   startResolutionPhase() {
     this.isCardLocked = false;
-    this.shieldChainCount = 0;
+    this.clearShieldHolds();
     this.state.phase = "resolution";
     this.state.roundCount += 1;
 
@@ -949,11 +1144,14 @@ export class LobbyRoom extends Room {
     this.state.players.forEach(p => {
       p.activeEffects = "";
     });
+
+    this.seedDrinkChains();
   }
 
   onDispose() {
     for (const timer of this.pendingDiscardTimers.values()) timer.clear();
     this.pendingDiscardTimers.clear();
+    this.clearShieldHolds();
     this.releaseClaimedRoomCode();
   }
 }

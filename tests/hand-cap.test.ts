@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
-import type { Client } from "@colyseus/core";
+import { CloseCode, type Client } from "@colyseus/core";
 import { LobbyRoom, HAND_CAP, PENDING_DISCARD_MS } from "../src/rooms/LobbyRoom";
 import { Player } from "../src/rooms/schema/LobbyState";
 import { client } from "./helpers";
@@ -401,7 +401,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     player.score = 9;
     player.drinks = 2;
 
-    await room.onLeave(client("ada"), true);
+    await room.onLeave(client("ada"), CloseCode.CONSENTED);
 
     assert.equal(room.state.players.has("ada"), false);
     room.onJoin(client("ada-2"), { name: "Ada" });
@@ -420,7 +420,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     emit(room, "discard_card", "ada", { cardIndex: 2 });
     assert.deepEqual(hand(player), ["OLDEST", "MIDDLE"]);
 
-    await room.onLeave(client("ada"), true);
+    await room.onLeave(client("ada"), CloseCode.CONSENTED);
     room.onJoin(client("ada-2"), { name: "Ada" });
     assert.deepEqual(hand(room.state.players.get("ada-2")!), ["OLDEST", "MIDDLE"]);
   });
