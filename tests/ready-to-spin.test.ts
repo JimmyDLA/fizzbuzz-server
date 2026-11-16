@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Client, CloseCode } from "@colyseus/core";
-import { DEV_TOOLS_ENV, LobbyRoom, isDevToolsEnabled } from "../src/rooms/LobbyRoom";
+import { DEV_TOOLS_ENV, HAND_CAP, LobbyRoom, isDevToolsEnabled } from "../src/rooms/LobbyRoom";
 import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "../src/rooms/lobbyErrors";
 import { Player } from "../src/rooms/schema/LobbyState";
 
@@ -80,6 +80,10 @@ function emit(room: LobbyRoom, type: string, client: FakeClient, message?: unkno
 }
 
 function ready(room: LobbyRoom, client: FakeClient, isReady = true): void {
+  const player = room.state.players.get(client.sessionId);
+  while (player?.pendingDiscard && player.cards.length > HAND_CAP) {
+    emit(room, "discard_card", client, { cardIndex: player.cards.length - 1 });
+  }
   emit(room, "ready", client, { isReady });
 }
 
