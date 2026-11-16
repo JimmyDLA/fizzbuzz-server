@@ -31,6 +31,10 @@ export class Player extends Schema {
    * all zeros. 0 until then, and 0 after an abort clears the round.
    */
   @type("number") betRank: number = 0;
+  /** Hand is over the 2-card cap until the player discards or the server does. */
+  @type("boolean") pendingDiscard: boolean = false;
+  /** Epoch ms when the server will discard the oldest card. 0 when not pending. */
+  @type("number") pendingDiscardDeadline: number = 0;
 }
 
 /** One seat on the end-of-match podium. `place` is 1, 2, or 3. Ties share a place. */

@@ -90,7 +90,16 @@ function emit(room: LobbyRoom, type: string, client: FakeClient, message?: unkno
   events.emit(type, client, message);
 }
 
+function discardPending(room: LobbyRoom, client: FakeClient): void {
+  const player = room.state.players.get(client.sessionId);
+  if (!player?.pendingDiscard) return;
+  while (player.pendingDiscard && player.cards.length > 2) {
+    emit(room, "discard_card", client, { cardIndex: player.cards.length - 1 });
+  }
+}
+
 function ready(room: LobbyRoom, client: FakeClient): void {
+  discardPending(room, client);
   emit(room, "ready", client, { isReady: true });
 }
 
