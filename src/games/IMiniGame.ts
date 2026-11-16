@@ -17,8 +17,17 @@ export interface GameResult {
    * one winner and one loser; tied throws are replayed and are not reported
    * here. Screen Painting lists everyone at the top coverage, while only the
    * earliest selected id is a winner.
+   * A no-action round leaves this empty.
    */
   tiedIds: string[];
+  /**
+   * How much each connected contestant did. Zero means no action.
+   * LobbyRoom forces every contestant to drink, with no winners, only when
+   * every connected contestant is listed and every score is 0. Any score above
+   * 0 leaves the game's winners, losers, and ties as reported.
+   * Hot Potato, Rock Paper Scissors, and Simon Says omit this.
+   */
+  actionScores?: Record<string, number>;
 }
 
 export function emptyGameResult(): GameResult {
