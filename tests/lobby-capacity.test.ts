@@ -463,6 +463,123 @@ describe("LOB-005 room cap", () => {
     }
   });
 
+  it("makes the reconnecting grace player host when the previous host has left", async () => {
+    const party = await openParty(port, post, ["V", "A"]);
+    try {
+      const orderBefore = party.room.joinSequence(party.actors.A.sessionId);
+      const keysBefore = playerKeys(party.room);
+      party.actors.A.socket.terminate();
+      await waitFor(() => party.room.state.players.get(party.actors.A.sessionId)?.isConnected === false
+        && party.room.state.players.has(party.actors.A.sessionId));
+      assert.equal(party.room.state.players.get(party.actors.V.sessionId)?.isHost, true);
+
+      party.actors.V.socket.close(4000);
+      await waitFor(() => !party.room.state.players.has(party.actors.V.sessionId));
+      assert.equal(connectedHostCount(party.room), 0);
+
+      await reconnectActor(port, post, party, "A");
+      assert.equal(party.room.joinSequence(party.actors.A.sessionId), orderBefore);
+      assert.deepEqual(playerKeys(party.room), keysBefore.filter((id) => id !== party.actors.V.sessionId));
+      assert.equal(party.room.state.players.get(party.actors.A.sessionId)?.isHost, true);
+      assertConnectedHost(party.room);
+
+      const joined = await post(`/matchmake/joinById/${party.roomId}`, { name: "C" });
+      assert.equal(joined.status, 200, JSON.stringify(joined.json));
+      const cId = String(joined.json.sessionId);
+      party.sockets.push(await openNodeSocket(port, {
+        processId: String(joined.json.processId),
+        roomId: party.roomId,
+        sessionId: cId,
+      }, party.room));
+      await waitFor(() => party.room.state.players.get(cId)?.isConnected === true);
+      assert.equal(party.room.state.players.get(cId)?.isHost, false);
+      assert.equal(party.room.state.players.get(party.actors.A.sessionId)?.isHost, true);
+      assert.ok(party.room.joinSequence(cId) > party.room.joinSequence(party.actors.A.sessionId));
+      assertConnectedHost(party.room);
+
+      party.room.state.phase = "chart";
+      emitRoom(party.room, "start_wheel", cId);
+      assert.equal(party.room.state.phase, "chart");
+      emitRoom(party.room, "start_wheel", party.actors.A.sessionId);
+      assert.equal(party.room.state.phase, "wheel");
+    } finally {
+      await releaseLobby({ roomId: party.roomId, room: party.room, seats: [], sockets: party.sockets as unknown as WebSocket[] });
+    }
+  });
+
+  it("promotes the first non-host to reconnect after everyone drops, and keeps join order", async () => {
+    const party = await openParty(port, post, ["V", "A", "B"]);
+    try {
+      const orders = {
+        V: party.room.joinSequence(party.actors.V.sessionId),
+        A: party.room.joinSequence(party.actors.A.sessionId),
+        B: party.room.joinSequence(party.actors.B.sessionId),
+      };
+      assert.ok(orders.V < orders.A && orders.A < orders.B);
+      const keysBefore = playerKeys(party.room);
+
+      for (const name of ["V", "A", "B"] as const) {
+        party.actors[name].socket.terminate();
+        await waitFor(() => party.room.state.players.get(party.actors[name].sessionId)?.isConnected === false);
+      }
+      assert.equal(connectedHostCount(party.room), 0);
+      assert.equal(party.room.state.players.get(party.actors.B.sessionId)?.isHost, true);
+
+      await reconnectActor(port, post, party, "A");
+      assert.equal(party.room.joinSequence(party.actors.A.sessionId), orders.A);
+      assert.deepEqual(playerKeys(party.room), keysBefore);
+      assert.equal(party.room.state.players.get(party.actors.A.sessionId)?.isHost, true);
+      assert.equal(party.room.state.players.get(party.actors.V.sessionId)?.isHost, false);
+      assert.equal(party.room.state.players.get(party.actors.B.sessionId)?.isHost, false);
+      assertConnectedHost(party.room);
+
+      await reconnectActor(port, post, party, "V");
+      assert.equal(party.room.joinSequence(party.actors.V.sessionId), orders.V);
+      assert.equal(party.room.state.players.get(party.actors.A.sessionId)?.isHost, true);
+      assert.equal(party.room.state.players.get(party.actors.V.sessionId)?.isHost, false);
+      assertConnectedHost(party.room);
+    } finally {
+      await releaseLobby({ roomId: party.roomId, room: party.room, seats: [], sockets: party.sockets as unknown as WebSocket[] });
+    }
+  });
+
+  it("keeps exactly one connected host across random join, drop, leave, and reconnect sequences", async () => {
+    const random = mulberry32(20261116);
+    const party = await openParty(port, post, []);
+    const names = ["P0", "P1", "P2", "P3"] as const;
+    try {
+      for (let step = 0; step < 36; step++) {
+        const connected = names.filter((name) => party.actors[name]?.status === "connected");
+        const grace = names.filter((name) => party.actors[name]?.status === "grace");
+        const absent = names.filter((name) => !party.actors[name] || party.actors[name].status === "out");
+        const roll = random();
+        if ((roll < 0.34 || connected.length + grace.length === 0) && absent.length > 0 && connected.length + grace.length < 4) {
+          await joinActor(port, post, party, absent[Math.floor(random() * absent.length)]);
+        } else if (roll < 0.56 && connected.length > 0) {
+          await dropActor(party, connected[Math.floor(random() * connected.length)]);
+        } else if (roll < 0.74 && connected.length > 0 && (connected.length > 1 || grace.length > 0)) {
+          await leaveActor(party, connected[Math.floor(random() * connected.length)]);
+        } else if (roll < 0.9 && grace.length > 0) {
+          const name = grace[Math.floor(random() * grace.length)];
+          const before = party.room.joinSequence(party.actors[name].sessionId);
+          const keys = playerKeys(party.room);
+          await reconnectActor(port, post, party, name);
+          assert.equal(party.room.joinSequence(party.actors[name].sessionId), before, `step ${step} join order`);
+          assert.deepEqual(playerKeys(party.room), keys, `step ${step} roster order`);
+        } else if (grace.length > 0) {
+          await expireActor(party, grace[Math.floor(random() * grace.length)]);
+        } else if (absent.length > 0) {
+          await joinActor(port, post, party, absent[Math.floor(random() * absent.length)]);
+        }
+        assertConnectedHost(party.room);
+      }
+    } finally {
+      if (party.roomId && party.room) {
+        await releaseLobby({ roomId: party.roomId, room: party.room, seats: [], sockets: party.sockets as unknown as WebSocket[] });
+      }
+    }
+  });
+
   it("frees the seat immediately when the leave is consented", async () => {
     const filled = await fillLobby(port, post);
     try {
@@ -528,6 +645,142 @@ async function fillLobby(
   }
   await waitFor(() => room().state.players.size === MAX_ROOM_PLAYERS && room().clients.length === MAX_ROOM_PLAYERS);
   return { roomId, room: room(), seats, sockets };
+}
+
+function connectedHostCount(room: LobbyRoom): number {
+  let count = 0;
+  room.state.players.forEach((player) => {
+    if (player.isConnected && player.isHost) count += 1;
+  });
+  return count;
+}
+
+function assertConnectedHost(room: LobbyRoom | undefined): void {
+  if (!room?.state) return;
+  let connected = 0;
+  let offlineHosts = 0;
+  room.state.players.forEach((player) => {
+    if (player.isConnected) connected += 1;
+    else if (player.isHost) offlineHosts += 1;
+  });
+  if (connected === 0) return;
+  assert.equal(connectedHostCount(room), 1, "a connected room needs exactly one connected host");
+  assert.equal(offlineHosts, 0, "an offline player cannot keep isHost while someone is connected");
+}
+
+function playerKeys(room: LobbyRoom): string[] {
+  return Array.from(room.state.players.keys());
+}
+
+type PartyActor = {
+  status: "connected" | "grace" | "out";
+  sessionId: string;
+  socket: WsWebSocket;
+  token: string;
+};
+
+type Party = {
+  roomId: string;
+  room: LobbyRoom;
+  actors: Record<string, PartyActor>;
+  sockets: WsWebSocket[];
+};
+
+async function openParty(
+  port: number,
+  post: (path: string, body: unknown) => Promise<{ status: number; json: Record<string, unknown> }>,
+  names: string[],
+): Promise<Party> {
+  const party: Party = { roomId: "", room: undefined as unknown as LobbyRoom, actors: {}, sockets: [] };
+  for (const name of names) await joinActor(port, post, party, name);
+  return party;
+}
+
+async function joinActor(
+  port: number,
+  post: (path: string, body: unknown) => Promise<{ status: number; json: Record<string, unknown> }>,
+  party: Party,
+  name: string,
+): Promise<void> {
+  if (party.roomId && !matchMaker.getLocalRoomById(party.roomId)) party.roomId = "";
+  const joined = party.roomId
+    ? await post(`/matchmake/joinById/${party.roomId}`, { name })
+    : await post("/matchmake/create/lobby", { name });
+  assert.equal(joined.status, 200, JSON.stringify(joined.json));
+  if (!party.roomId) {
+    party.roomId = String(joined.json.roomId);
+    party.room = matchMaker.getLocalRoomById(party.roomId) as LobbyRoom;
+  }
+  const sessionId = String(joined.json.sessionId);
+  const socket = await openNodeSocket(port, {
+    processId: String(joined.json.processId),
+    roomId: party.roomId,
+    sessionId,
+  }, party.room);
+  const client = party.room.clients.find((entry) => entry.sessionId === sessionId);
+  party.actors[name] = {
+    status: "connected",
+    sessionId,
+    socket,
+    token: String((client as { reconnectionToken?: string } | undefined)?.reconnectionToken),
+  };
+  party.sockets.push(socket);
+}
+
+async function dropActor(party: Party, name: string): Promise<void> {
+  const actor = party.actors[name];
+  const client = party.room.clients.find((entry) => entry.sessionId === actor.sessionId);
+  actor.token = String((client as { reconnectionToken?: string } | undefined)?.reconnectionToken);
+  actor.socket.terminate();
+  await waitFor(() => party.room.state.players.get(actor.sessionId)?.isConnected === false
+    && party.room.state.players.has(actor.sessionId));
+  actor.status = "grace";
+}
+
+async function leaveActor(party: Party, name: string): Promise<void> {
+  const actor = party.actors[name];
+  actor.socket.close(4000);
+  await waitFor(() => !party.room.state.players.has(actor.sessionId));
+  actor.status = "out";
+}
+
+async function reconnectActor(
+  port: number,
+  post: (path: string, body: unknown) => Promise<{ status: number; json: Record<string, unknown> }>,
+  party: Party,
+  name: string,
+): Promise<void> {
+  const actor = party.actors[name];
+  const reconnect = await post(`/matchmake/reconnect/${party.roomId}`, { reconnectionToken: actor.token });
+  assert.equal(reconnect.status, 200, JSON.stringify(reconnect.json));
+  assert.equal(String(reconnect.json.sessionId), actor.sessionId);
+  const socket = await openNodeSocket(port, {
+    processId: String(reconnect.json.processId),
+    roomId: party.roomId,
+    sessionId: actor.sessionId,
+    reconnectionToken: actor.token,
+  }, party.room);
+  actor.socket = socket;
+  actor.status = "connected";
+  party.sockets.push(socket);
+  await waitFor(() => party.room.state.players.get(actor.sessionId)?.isConnected === true);
+}
+
+async function expireActor(party: Party, name: string): Promise<void> {
+  const actor = party.actors[name];
+  expireGrace(party.room, actor.sessionId);
+  await waitFor(() => !party.room.state.players.has(actor.sessionId));
+  actor.status = "out";
+}
+
+function mulberry32(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state + 0x6D2B79F5) | 0;
+    let value = Math.imul(state ^ (state >>> 15), 1 | state);
+    value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 function hostIds(room: LobbyRoom): string[] {
