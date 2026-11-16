@@ -5,7 +5,9 @@ import { describe, it } from "node:test";
 import type { Client } from "@colyseus/core";
 import { LobbyRoom, HAND_CAP, PENDING_DISCARD_MS } from "../src/rooms/LobbyRoom";
 import { Player } from "../src/rooms/schema/LobbyState";
-import { client } from "./helpers";
+import { client, enableDevTools, leaveConsented } from "./helpers";
+
+enableDevTools();
 
 /**
  * CRD-005, CRD-012, CRD-016. The server allows one temporary third card.
@@ -45,7 +47,8 @@ function addPlayer(room: LobbyRoom, id: string, name: string, host = false): { p
   const player = new Player();
   player.id = id;
   player.name = name;
-  player.isHost = host;
+  const hostTaken = Array.from(room.state.players.values()).some((existing) => existing.isHost);
+  player.isHost = host && !hostTaken;
   player.isConnected = true;
   player.isReady = false;
   player.score = 0;
@@ -61,7 +64,22 @@ function addPlayer(room: LobbyRoom, id: string, name: string, host = false): { p
 }
 
 function award(room: LobbyRoom, id: string, cardId: string, from = id): void {
+  enableDevTools();
   emit(room, "dev_award_card", from, { targetPlayerId: id, cardId });
+}
+
+/** A forced spin needs two connected players once the wheel checks the floor. */
+function spin(room: LobbyRoom, type: string, category: string, primary = "ada"): void {
+  const ids = [primary];
+  room.state.players.forEach((player, id) => {
+    if (id !== primary && player.isConnected) ids.push(id);
+  });
+  if (ids.length < 2) {
+    const mate = `${primary}-mate`;
+    addPlayer(room, mate, "Mate");
+    ids.push(mate);
+  }
+  room.forceWheelPhase(type, category, ids);
 }
 
 function overflow(cardIds: [string, string, string] = ["OLDEST", "MIDDLE", "NEWEST"]): {
@@ -326,9 +344,9 @@ describe("15s auto-discard", () => {
 
   it("does not change another player's hand", () => {
     const { room, player } = overflow();
-    const { player: bea } = addPlayer(room, "bea", "Bea", true);
-    award(room, "bea", "SHIELD", "bea");
-    award(room, "bea", "RESPIN", "bea");
+    const { player: bea } = addPlayer(room, "bea", "Bea");
+    award(room, "bea", "SHIELD", "ada");
+    award(room, "bea", "RESPIN", "ada");
 
     advance(room, PENDING_DISCARD_MS);
     assert.deepEqual(hand(player), ["MIDDLE", "NEWEST"]);
@@ -351,7 +369,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     player.score = 9;
     player.drinks = 2;
 
-    await room.onLeave(client("ada"), true);
+    await leaveConsented(room, "ada");
 
     assert.equal(room.state.players.has("ada"), false);
     room.onJoin(client("ada-2"), { name: "Ada" });
@@ -370,7 +388,7 @@ describe("CRD-012 / CRD-016 reconnect", () => {
     emit(room, "discard_card", "ada", { cardIndex: 2 });
     assert.deepEqual(hand(player), ["OLDEST", "MIDDLE"]);
 
-    await room.onLeave(client("ada"), true);
+    await leaveConsented(room, "ada");
     room.onJoin(client("ada-2"), { name: "Ada" });
     assert.deepEqual(hand(room.state.players.get("ada-2")!), ["OLDEST", "MIDDLE"]);
   });
@@ -445,7 +463,7 @@ describe("round drop and turbo refund", () => {
     award(room, "ada", "RESPIN");
     player.activeEffects = JSON.stringify({ turbo: true, doublePoints: true });
 
-    room.forceWheelPhase("1v1", "Hot Potato", ["ada"]);
+    spin(room, "1v1", "Hot Potato");
 
     assert.deepEqual(hand(player), ["SHIELD", "RESPIN", "TURBO"]);
     assert.equal(player.pendingDiscard, true);
@@ -458,7 +476,7 @@ describe("round drop and turbo refund", () => {
     const { room, player } = overflow(["SHIELD", "RESPIN", "WILD CARD"]);
     player.activeEffects = JSON.stringify({ turbo: true });
 
-    room.forceWheelPhase("BR", "Simon Says", ["ada"]);
+    spin(room, "BR", "Simon Says");
 
     assert.deepEqual(hand(player), ["SHIELD", "RESPIN", "WILD CARD"]);
     assert.equal(JSON.parse(player.activeEffects).turbo, false);
@@ -470,7 +488,7 @@ describe("round drop and turbo refund", () => {
     award(room, "ada", "SHIELD");
     player.activeEffects = JSON.stringify({ turbo: true });
 
-    room.forceWheelPhase("1v1", "Tapping Race", ["ada"]);
+    spin(room, "1v1", "Tapping Race");
 
     assert.deepEqual(hand(player), ["SHIELD"]);
     assert.equal(JSON.parse(player.activeEffects).turbo, true);

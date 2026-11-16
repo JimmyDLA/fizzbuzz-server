@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 import type { Client } from "@colyseus/core";
 import { LobbyRoom, PENDING_DISCARD_MS } from "../src/rooms/LobbyRoom";
 import { Player } from "../src/rooms/schema/LobbyState";
-import { client } from "./helpers";
+import { client, enableDevTools, leaveConsented } from "./helpers";
+
+enableDevTools();
 
 /**
  * A card earned in round N can be played starting round N+1.
@@ -69,7 +71,8 @@ function addPlayer(room: LobbyRoom, id: string, name: string, host = false): { p
   const player = new Player();
   player.id = id;
   player.name = name;
-  player.isHost = host;
+  const hostTaken = Array.from(room.state.players.values()).some((existing) => existing.isHost);
+  player.isHost = host && !hostTaken;
   player.isConnected = true;
   player.isReady = false;
   player.score = 0;
@@ -85,7 +88,22 @@ function addPlayer(room: LobbyRoom, id: string, name: string, host = false): { p
 }
 
 function award(room: LobbyRoom, id: string, cardId: string, from = id): void {
+  enableDevTools();
   emit(room, "dev_award_card", from, { targetPlayerId: id, cardId });
+}
+
+/** A forced spin needs two connected players once the wheel checks the floor. */
+function spin(room: LobbyRoom, type: string, category: string, primary = "ada"): void {
+  const ids = [primary];
+  room.state.players.forEach((player, id) => {
+    if (id !== primary && player.isConnected) ids.push(id);
+  });
+  if (ids.length < 2) {
+    const mate = `${primary}-mate`;
+    addPlayer(room, mate, "Mate");
+    ids.push(mate);
+  }
+  room.forceWheelPhase(type, category, ids);
 }
 
 function lastError(sent: Sent[]): CardError {
@@ -297,7 +315,7 @@ describe("same round rejected, next round allowed", () => {
     assert.deepEqual(rounds(player), [2]);
 
     room.state.roundCount = 1;
-    room.forceWheelPhase("1v1", "Simon Says", ["ada"]);
+    spin(room, "1v1", "Simon Says");
     assert.deepEqual(hand(player), ["TURBO", "TURBO"]);
     assert.deepEqual(rounds(player), [2, 1]);
 
@@ -406,7 +424,7 @@ describe("hand cap, auto-discard, and reconnect", () => {
     player.score = 9;
     player.drinks = 2;
 
-    await room.onLeave(client("ada"), true);
+    await leaveConsented(room, "ada");
     room.onJoin(client("ada-2"), { name: "Ada" });
     const restored = room.state.players.get("ada-2");
     assert.ok(restored);
@@ -487,7 +505,7 @@ describe("hand cap, auto-discard, and reconnect", () => {
     assert.equal(player.pendingDiscard, true);
     assert.deepEqual(rounds(player), [2, 4, 5]);
 
-    await room.onLeave(client("ada"), true);
+    await leaveConsented(room, "ada");
     room.onJoin(client("ada-2"), { name: "Ada" });
     const restored = room.state.players.get("ada-2");
     assert.ok(restored);
@@ -511,7 +529,7 @@ describe("turbo refund", () => {
     assert.deepEqual(hand(player), []);
     assert.equal(JSON.parse(player.activeEffects).turboEarnedRound, 2);
 
-    room.forceWheelPhase("1v1", "Hot Potato", ["ada"]);
+    spin(room, "1v1", "Hot Potato");
     assert.deepEqual(hand(player), ["TURBO"]);
     assert.deepEqual(rounds(player), [2]);
     const refunded = JSON.parse(player.activeEffects);
@@ -534,7 +552,7 @@ describe("turbo refund", () => {
     award(room, "ada", "SHIELD");
     player.activeEffects = JSON.stringify({ turbo: true, doublePoints: true });
 
-    room.forceWheelPhase("1v1", "Hot Potato", ["ada"]);
+    spin(room, "1v1", "Hot Potato");
     assert.deepEqual(hand(player), ["SHIELD", "TURBO"]);
     assert.deepEqual(rounds(player), [6, 6]);
     const fx = JSON.parse(player.activeEffects);
@@ -564,7 +582,7 @@ describe("turbo refund", () => {
     award(room, "ada", "WILD CARD");
     player.activeEffects = JSON.stringify({ turbo: true, turboEarnedRound: 1 });
 
-    room.forceWheelPhase("BR", "Simon Says", ["ada"]);
+    spin(room, "BR", "Simon Says");
 
     assert.deepEqual(hand(player), ["SHIELD", "RESPIN", "WILD CARD"]);
     assert.deepEqual(rounds(player), [4, 4, 4]);

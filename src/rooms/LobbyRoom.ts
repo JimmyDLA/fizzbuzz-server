@@ -1021,8 +1021,14 @@ export class LobbyRoom extends Room {
     });
   }
 
-  onDispose() {
+  private stopPendingDiscardTimers(): void {
     for (const timer of this.pendingDiscardTimers.values()) timer.clear();
     this.pendingDiscardTimers.clear();
+  }
+
+  // Keep this method to the timer cleanup. A branch that also defines onDispose
+  // (it clears the game-loop interval) must be merged into this one method.
+  onDispose() {
+    this.stopPendingDiscardTimers();
   }
 }
