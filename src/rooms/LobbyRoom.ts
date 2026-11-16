@@ -13,7 +13,7 @@ import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
-import { applyDoublePoints, applyStandardScoring } from "./scoring";
+import { applyDoublePoints, applyStandardScoring, scoreGameResult } from "./scoring";
 import { specialtyCardDropPool, specialtyCardRarity } from "./specialtyCards";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
@@ -752,13 +752,13 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * Games only report who won, who drinks, and who tied.
-   * Standard +3 / +1 drink is applied here, once, before resolution.
+   * Games report who won, who drinks, and how much each contestant did.
+   * A round where every reported action score is 0 has no winners and every
+   * contestant drinks. Standard +3 / +1 drink is applied here, once.
    */
   applyActiveGameResult() {
     if (!this.activeGame) return;
-    const result = this.activeGame.onEnd(this.state);
-    applyStandardScoring(this.state, result);
+    scoreGameResult(this.state, this.activeGame.onEnd(this.state));
   }
 
   startResolutionPhase() {
