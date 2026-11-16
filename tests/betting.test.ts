@@ -339,6 +339,25 @@ describe("pot split", () => {
       assert.equal(large.reduce((sum, share) => sum + share.payout, 0), 6);
     }
 
+    const lowPot = splitPot(
+      [
+        { playerId: "a", standing: 2 },
+        { playerId: "b", standing: 2 },
+        { playerId: "c", standing: 0 },
+      ],
+      1,
+    );
+    assert.deepEqual(lowPot.map((share) => share.payout), [1, 0, 0]);
+    assert.equal(lowPot.reduce((sum, share) => sum + share.payout, 0), 1);
+
+    const seven = [3, 3, 2, 1, 1, 1, 0].map((standing, index) => ({
+      playerId: `p${index + 1}`,
+      standing,
+    }));
+    const sevenShares = splitPot(seven, 7);
+    assert.deepEqual(sevenShares.map((share) => share.payout), [2, 1, 1, 1, 1, 1, 0]);
+    assert.equal(sevenShares.reduce((sum, share) => sum + share.payout, 0), 7);
+
     // Unequal stakes stay proportional. a and b are tied, but a staked more.
     const uneven = splitPot(tiedFirst, 6, { a: 3, b: 1, c: 1 });
     assert.deepEqual(uneven.map((share) => share.payout), [4, 1, 1]);
@@ -865,7 +884,67 @@ describe("no-action betting refunds", () => {
     for (const id of ["ada", "bea", "cal"]) assert.equal(room.state.players.get(id)?.betRank, 1, id);
     assert.deepEqual(room.state.lastLosers.toArray().slice().sort(), ["ada", "bea", "cal"]);
   });
+
+  it("pays the last Simon Says player when everyone still has a zero score", async () => {
+    const { room } = bootRoom();
+    const ada = addPlayer(room, "ada", { host: true, score: 0 });
+    const bea = addPlayer(room, "bea", { score: 0 });
+    const cal = addPlayer(room, "cal", { score: 0 });
+    const dee = addPlayer(room, "dee", { score: 0 });
+    room.state.roundCount = 0;
+    assert.equal(room.forceWheelPhase("BR", "Simon Says", ["ada", "bea", "cal", "dee"]), true);
+    await eliminateThenLeave(room, [ada, bea, cal, dee]);
+
+    assert.deepEqual(room.state.lastWinners.toArray(), ["ada"]);
+    assert.equal(room.state.players.get("ada")?.score, 3);
+    assert.equal(room.state.players.get("ada")?.drinks, 0);
+    assert.equal(room.state.players.get("cal")?.score, 0);
+    assert.equal(room.state.players.get("cal")?.drinks, 1);
+    assert.equal(room.state.bettingRefunded, false);
+    assert.equal(room.state.bettingPot, 0);
+  });
+
+  it("does not refund a betting Simon Says round won by outlasting", async () => {
+    const { room, broadcasts } = bootRoom();
+    const ada = addPlayer(room, "ada", { host: true, score: 6 });
+    const bea = addPlayer(room, "bea", { score: 6 });
+    const cal = addPlayer(room, "cal", { score: 6 });
+    const dee = addPlayer(room, "dee", { score: 6 });
+    room.state.roundCount = 4;
+    assert.equal(room.forceWheelPhase("BR", "Simon Says", ["ada", "bea", "cal", "dee"]), true);
+    assert.equal(room.state.bettingPot, 12);
+    await eliminateThenLeave(room, [ada, bea, cal, dee]);
+
+    assert.deepEqual(room.state.lastWinners.toArray(), ["ada"]);
+    assert.equal(room.state.bettingRefunded, false);
+    const [paid] = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
+    assert.equal(paid.reason, "payout");
+    assert.equal(paid.refunded, false);
+    assert.equal(paid.payouts.reduce((sum, entry) => sum + entry.payout, 0), 12);
+    assert.equal(room.state.players.get("ada")?.betPayout, 6);
+    assert.equal(room.state.players.get("cal")?.betPayout, 6);
+  });
 });
+
+async function eliminateThenLeave(room: LobbyRoom, clients: FakeClient[]): Promise<void> {
+  const [ada, bea, cal, dee] = clients;
+  const game = new SimonSays();
+  room.activeGame = game;
+  room.state.phase = "playing";
+  game.onInit(room.state);
+  const holder = room.state.players.get(room.state.selectedPlayers[0])!;
+  const data = JSON.parse(holder.gameData);
+  data.phase = "input";
+  room.state.selectedPlayers.forEach((id) => {
+    room.state.players.get(id)!.gameData = JSON.stringify(data);
+  });
+  game.onMessage(client(cal.sessionId), { action: "tap", color: 99 }, room.state);
+  room.state.phase = "playing";
+  await room.onLeave(bea as unknown as Client, CloseCode.CONSENTED);
+  await room.onLeave(dee as unknown as Client, CloseCode.CONSENTED);
+  room.applyActiveGameResult();
+  assert.equal(ada.sessionId, "ada");
+}
 
 describe("Battle Royale is forced", () => {
   it("rejects a Wild Card mode switch and still lets it pick the game", () => {
@@ -1276,6 +1355,24 @@ describe("grace, abort, and non-betting rounds", () => {
     assert.equal(room.state.players.get("cal")?.score, 9);
     assert.equal(room.state.bettingPot, 9);
     assert.equal(ada2.sessionId, "ada2");
+  });
+
+  it("swaps the selected seat when a player rejoins during betting resolution", async () => {
+    const { room } = bootRoom();
+    const ada = joinNamed(room, "ada", "Ada");
+    joinNamed(room, "bea", "Bea");
+    room.state.roundCount = 15;
+    room.state.phase = "resolution";
+    room.state.isBettingRound = true;
+    room.state.selectedPlayers.push("ada", "bea");
+    const pending = beginGrace(room, ada);
+    const ada2 = joinNamed(room, "ada2", "Ada");
+
+    assert.equal(room.state.selectedPlayers.includes("ada"), false);
+    assert.equal(room.state.selectedPlayers.includes("ada2"), true);
+    assert.equal(room.state.players.has("ada"), false);
+    assert.equal(room.state.players.get("ada2")?.name, "Ada");
+    await finishGrace(room, ada, pending, false);
   });
 });
 

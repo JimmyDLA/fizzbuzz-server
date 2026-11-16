@@ -189,8 +189,10 @@ function lcm(a: number, b: number): number {
  * pass. In the stake-weighted split only members with a stake above 0 are
  * eligible. Anything still left goes out one point at a time by earliest
  * input order, starting with the highest-remainder group that was skipped.
- * That fallback is the only time tied players differ by 1. The shares add
- * up to `pot`.
+ * That fallback is the only time tied players differ by 1. A leftover point
+ * that would pay a worse place more than a better place who staked at least
+ * as much goes to the top group instead, earliest selection first. The shares
+ * add up to `pot`.
  */
 export function splitPot(
   placements: readonly Placement[],
@@ -281,9 +283,25 @@ export function splitPot(
   const give = (member: Member) => {
     extra.set(member.playerId, (extra.get(member.playerId) ?? 0) + 1);
   };
+  const payoutOf = (member: Member) => member.floor + (extra.get(member.playerId) ?? 0);
   const eligibleIn = (group: Member[]) => group
     .filter((member) => member.stake > 0)
     .sort((a, b) => a.order - b.order);
+  const topEligible = eligibleIn(groups[0] ?? []);
+  const givePreservingOrder = (member: Member) => {
+    const next = payoutOf(member) + 1;
+    const overtakesBetterPlace = members.some((other) => (
+      other.stake > 0
+      && other.rank < member.rank
+      && member.stake <= other.stake
+      && payoutOf(other) < next
+    ));
+    if (overtakesBetterPlace && topEligible.length > 0 && topEligible[0] !== member) {
+      give(topEligible[0]);
+      return;
+    }
+    give(member);
+  };
 
   const byRemainder = groups
     .map((group) => {
@@ -305,7 +323,7 @@ export function splitPot(
       skipped.push(group);
       continue;
     }
-    for (const member of group.eligible) give(member);
+    for (const member of group.eligible) givePreservingOrder(member);
     leftover -= group.eligible.length;
     awarded.push(group);
   }
@@ -313,7 +331,7 @@ export function splitPot(
   const oneAtATime = [...skipped, ...awarded].flatMap((group) => group.eligible);
   let cursor = 0;
   while (leftover > 0 && oneAtATime.length > 0) {
-    give(oneAtATime[cursor % oneAtATime.length]);
+    givePreservingOrder(oneAtATime[cursor % oneAtATime.length]);
     leftover -= 1;
     cursor += 1;
   }

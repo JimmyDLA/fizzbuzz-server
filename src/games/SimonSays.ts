@@ -207,7 +207,8 @@ export class SimonSays implements IMiniGame {
 
     // Room timer expired before winners were set. Players still in who have
     // survived a round share the win. Round 0 (nobody has survived a round)
-    // drinks everyone. actionScores stay at 0 so a betting round refunds.
+    // drinks everyone. Simon Says does not report actionScores: elimination
+    // and outlasting decide the result, including when every gameScore is 0.
     if (winners.length === 0 && gameData.activePlayers && gameData.activePlayers.length > 0) {
       const active: string[] = gameData.activePlayers;
       const survivedARound = active.some((id: string) => (state.players.get(id)?.gameScore || 0) > 0);
@@ -248,16 +249,10 @@ export class SimonSays implements IMiniGame {
       leaderboard
     });
 
-    const actionScores: Record<string, number> = {};
-    ids.forEach(id => {
-      actionScores[id] = state.players.get(id)?.gameScore || 0;
-    });
-
     return {
       winners: state.lastWinners.toArray(),
       losers: state.lastLosers.toArray(),
       tiedIds,
-      actionScores,
     };
   }
 

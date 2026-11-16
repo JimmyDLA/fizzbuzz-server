@@ -423,6 +423,7 @@ export class LobbyRoom extends Room {
       }
       this.keepJoinOrder(client.sessionId, existingPlayerId);
       this.moveBettingSeat(existingPlayerId, client.sessionId);
+      this.retargetSelectedPlayer(existingPlayerId, client.sessionId);
       this.clearPendingDiscardTimer(existingPlayerId);
       this.cardAcquiredAt.delete(existingPlayerId);
       this.state.players.delete(existingPlayerId);
@@ -472,6 +473,12 @@ export class LobbyRoom extends Room {
     if (!this.joinOrder.has(sessionId)) {
       this.joinOrder.set(sessionId, this.nextJoinOrder++);
     }
+  }
+
+  /** A name rejoin keeps the same seat in the current round's roster. */
+  private retargetSelectedPlayer(fromId: string, toId: string) {
+    const index = this.state.selectedPlayers.indexOf(fromId);
+    if (index !== -1) this.state.selectedPlayers[index] = toId;
   }
 
   /** A name rejoin keeps the same stake under the new session id. */
