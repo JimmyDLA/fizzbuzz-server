@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class Trivia implements IMiniGame {
@@ -9,6 +9,7 @@ export class Trivia implements IMiniGame {
   private currentBatch: any[] = [];
   private currentQuestionIndex: number = 0;
   private isTransitioning: boolean = false;
+  private playerHistory = new Map<string, boolean[]>();
 
   static async ensurePool() {
     if (Trivia.isFetchingPool) return;
@@ -22,12 +23,34 @@ export class Trivia implements IMiniGame {
       }
     } catch (error) {
       console.error("Failed to fetch trivia questions:", error);
-      if (Trivia.questionPool.length === 0) {
-        Trivia.questionPool.push({
-          question: { text: "What is the capital of France?" },
-          correctAnswer: "Paris",
-          incorrectAnswers: ["London", "Berlin", "Rome"]
-        });
+      if (Trivia.questionPool.length < 5) {
+        Trivia.questionPool.push(
+          {
+            question: { text: "What is the capital of France?" },
+            correctAnswer: "Paris",
+            incorrectAnswers: ["London", "Berlin", "Rome"]
+          },
+          {
+            question: { text: "Which planet is known as the Red Planet?" },
+            correctAnswer: "Mars",
+            incorrectAnswers: ["Earth", "Jupiter", "Venus"]
+          },
+          {
+            question: { text: "Who wrote 'Romeo and Juliet'?" },
+            correctAnswer: "William Shakespeare",
+            incorrectAnswers: ["Jane Austen", "Charles Dickens", "Mark Twain"]
+          },
+          {
+            question: { text: "What is the largest ocean on Earth?" },
+            correctAnswer: "Pacific Ocean",
+            incorrectAnswers: ["Atlantic Ocean", "Indian Ocean", "Arctic Ocean"]
+          },
+          {
+            question: { text: "How many bones are there in an adult human body?" },
+            correctAnswer: "206",
+            incorrectAnswers: ["208", "210", "212"]
+          }
+        );
       }
     } finally {
       Trivia.isFetchingPool = false;
@@ -39,17 +62,24 @@ export class Trivia implements IMiniGame {
   }
 
   private async initializeGame(state: LobbyState) {
-    if (Trivia.questionPool.length < 3) {
+    if (Trivia.questionPool.length < 5) {
       await Trivia.ensurePool();
     }
-    
-    this.currentBatch = Trivia.questionPool.splice(0, 3);
-    
-    if (Trivia.questionPool.length <= 1) {
-       Trivia.ensurePool(); 
+
+    state.selectedPlayers.forEach(id => {
+      this.playerHistory.set(id, []);
+      const p = state.players.get(id);
+      if (p) p.gameScore = 0;
+    });
+
+    this.currentBatch = Trivia.questionPool.splice(0, 5);
+
+    if (Trivia.questionPool.length <= 2) {
+      Trivia.ensurePool();
     }
 
     this.currentQuestionIndex = 0;
+    this.isTransitioning = false;
     this.broadcastState(state);
   }
 
@@ -67,7 +97,8 @@ export class Trivia implements IMiniGame {
       total: this.currentBatch.length,
       answeredCorrectly: false,
       isTransitioning: false,
-      isLockedOut: false
+      isLockedOut: false,
+      gameOver: false
     };
 
     state.selectedPlayers.forEach(id => {
@@ -83,7 +114,7 @@ export class Trivia implements IMiniGame {
       const p = state.players.get(id);
       if (p) {
         let oldData: any = {};
-        try { oldData = JSON.parse(p.gameData || "{}"); } catch (e) {}
+        try { oldData = JSON.parse(p.gameData || "{}"); } catch (e) { }
         p.gameData = JSON.stringify({
           ...oldData,
           isTransitioning: true,
@@ -104,15 +135,15 @@ export class Trivia implements IMiniGame {
   }
 
   onMessage(client: Client, message: any, state: LobbyState): void {
-      if (message.action === "answer") {
+    if (message.action === "answer") {
       if (this.isTransitioning) return;
 
       const player = state.players.get(client.sessionId);
       if (!player || !state.selectedPlayers.includes(client.sessionId)) return;
 
       let oldData: any = {};
-      try { oldData = JSON.parse(player.gameData || "{}"); } catch (e) {}
-      if (oldData.isLockedOut) return;
+      try { oldData = JSON.parse(player.gameData || "{}"); } catch (e) { }
+      if (oldData.isLockedOut || oldData.gameOver) return;
 
       const q = this.currentBatch[this.currentQuestionIndex];
       if (!q) return;
@@ -122,16 +153,36 @@ export class Trivia implements IMiniGame {
         this.isTransitioning = true;
         this.broadcastTransitionState(state, player.name, q.correctAnswer);
 
+        this.playerHistory.get(client.sessionId)?.push(true);
+        state.selectedPlayers.forEach(id => {
+          if (id !== client.sessionId) {
+            this.playerHistory.get(id)?.push(false);
+          }
+        });
+
         setTimeout(() => {
+          if (state.phase !== "playing") return;
           this.isTransitioning = false;
           this.currentQuestionIndex++;
-          
+
           if (this.currentQuestionIndex >= this.currentBatch.length) {
-            state.timer = 0; // Force end the game loop immediately
+            state.selectedPlayers.forEach(id => {
+              const p = state.players.get(id);
+              if (p) {
+                let lp: any = {};
+                try { lp = JSON.parse(p.gameData || "{}"); } catch (e) { }
+                lp.winnerId = client.sessionId;
+                lp.gameOver = true;
+                lp.isTransitioning = false;
+                lp.index = this.currentQuestionIndex;
+                p.gameData = JSON.stringify(lp);
+              }
+            });
+            state.timer = 1;
           } else {
             this.broadcastState(state);
           }
-        }, 2000);
+        }, 3000);
       } else {
         // Punish player for wrong answer by locking them out of the current question
         player.gameData = JSON.stringify({
@@ -143,9 +194,9 @@ export class Trivia implements IMiniGame {
         let allLockedOut = true;
         state.selectedPlayers.forEach(id => {
           const sp = state.players.get(id);
-          if (sp) {
+          if (sp && sp.isConnected) {
             let spData: any = {};
-            try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
+            try { spData = JSON.parse(sp.gameData || "{}"); } catch (e) { }
             if (!spData.isLockedOut) {
               allLockedOut = false;
             }
@@ -153,23 +204,121 @@ export class Trivia implements IMiniGame {
         });
 
         if (allLockedOut) {
-          // Everyone got it wrong! Skip to the next question immediately
-          this.currentQuestionIndex++;
-          if (this.currentQuestionIndex >= this.currentBatch.length) {
-            state.timer = 0; // Force end the game loop immediately
-          } else {
-            this.broadcastState(state);
-          }
+          this.isTransitioning = true;
+          this.broadcastTransitionState(state, "Nobody", q.correctAnswer);
+
+          state.selectedPlayers.forEach(id => {
+            this.playerHistory.get(id)?.push(false);
+          });
+          
+          setTimeout(() => {
+            if (state.phase !== "playing") return;
+            this.isTransitioning = false;
+            this.currentQuestionIndex++;
+
+            if (this.currentQuestionIndex >= this.currentBatch.length) {
+              state.selectedPlayers.forEach(id => {
+                const p = state.players.get(id);
+                if (p) {
+                  let lp: any = {};
+                  try { lp = JSON.parse(p.gameData || "{}"); } catch (e) { }
+                  lp.gameOver = true;
+                  lp.isTransitioning = false;
+                  lp.index = this.currentQuestionIndex;
+                  p.gameData = JSON.stringify(lp);
+                }
+              });
+              state.timer = 1;
+            } else {
+              this.broadcastState(state);
+            }
+          }, 3000);
         }
       }
     }
   }
 
-  onTick(state: LobbyState): void {}
+  onTick(state: LobbyState): void { }
 
-  onEnd(state: LobbyState): void {
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    this.playerHistory.delete(sessionId);
+    if (this.isTransitioning || state.selectedPlayers.length === 0) return;
+
+    const q = this.currentBatch[this.currentQuestionIndex];
+    if (!q) return;
+
+    let allLockedOut = true;
+    state.selectedPlayers.forEach(id => {
+      const sp = state.players.get(id);
+      if (sp && sp.isConnected) {
+        let spData: any = {};
+        try { spData = JSON.parse(sp.gameData || "{}"); } catch (e) { }
+        if (!spData.isLockedOut) {
+          allLockedOut = false;
+        }
+      }
+    });
+
+    if (allLockedOut) {
+      this.isTransitioning = true;
+      this.broadcastTransitionState(state, "Nobody", q.correctAnswer);
+
+      state.selectedPlayers.forEach(id => {
+        this.playerHistory.get(id)?.push(false);
+      });
+      
+      setTimeout(() => {
+        if (state.phase !== "playing") return;
+        this.isTransitioning = false;
+        this.currentQuestionIndex++;
+
+        if (this.currentQuestionIndex >= this.currentBatch.length) {
+          state.selectedPlayers.forEach(id => {
+            const p = state.players.get(id);
+            if (p) {
+              let lp: any = {};
+              try { lp = JSON.parse(p.gameData || "{}"); } catch (e) { }
+              lp.gameOver = true;
+              lp.isTransitioning = false;
+              lp.index = this.currentQuestionIndex;
+              p.gameData = JSON.stringify(lp);
+            }
+          });
+          state.timer = 1;
+        } else {
+          this.broadcastState(state);
+        }
+      }, 3000);
+    }
+  }
+
+  onEnd(state: LobbyState): GameResult {
     let winners: string[] = [];
-    const ids = state.selectedPlayers.toArray();
+    let tiedIds: string[] = [];
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
+    // Answers only. A Turbo +1 by itself is not acting.
+    const answered: Record<string, number> = {};
+    ids.forEach(id => {
+      answered[id] = state.players.get(id)?.gameScore || 0;
+    });
+    const anyoneAnswered = ids.some(id => answered[id] > 0);
+
+    if (anyoneAnswered) {
+      ids.forEach(id => {
+        const p = state.players.get(id);
+        if (p && p.activeEffects) {
+          try {
+            const fx = JSON.parse(p.activeEffects);
+            if (fx.turbo) {
+              p.gameScore += 1;
+            }
+          } catch (e) {}
+        }
+      });
+    }
 
     if (state.currentGameType === "2v2" && ids.length === 4) {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
@@ -177,6 +326,7 @@ export class Trivia implements IMiniGame {
 
       if (t1Score >= t2Score && t1Score > 0) winners.push(ids[0], ids[1]);
       if (t2Score >= t1Score && t2Score > 0) winners.push(ids[2], ids[3]);
+      if (t1Score === t2Score && t1Score > 0) tiedIds = [...winners];
     } else {
       let maxScore = -1;
       ids.forEach(id => {
@@ -192,22 +342,67 @@ export class Trivia implements IMiniGame {
       });
       // Winners only count if score > 0
       if (maxScore <= 0) winners = [];
+      if (winners.length > 1) tiedIds = [...winners];
     }
 
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    state.selectedPlayers.forEach(id => {
+    ids.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         if (winners.length > 0 && winners.includes(id)) {
-          p.score += 3;
           state.lastWinners.push(id);
         } else {
-          p.drinks += 1;
           state.lastLosers.push(id);
         }
       }
     });
+
+    const is2v2 = state.currentGameType === "2v2" && ids.length === 4;
+    const t1Score = is2v2 ? (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0) : 0;
+    const t2Score = is2v2 ? (state.players.get(ids[2])?.gameScore || 0) + (state.players.get(ids[3])?.gameScore || 0) : 0;
+
+    const timeline = ids.map(id => {
+      const p = state.players.get(id);
+      const history = this.playerHistory.get(id) || [];
+      
+      let scoreValue = p?.gameScore || 0;
+      let scoreLabel = `${scoreValue} Points`;
+
+      if (is2v2) {
+        const isTeam1 = id === ids[0] || id === ids[1];
+        const teamScore = isTeam1 ? t1Score : t2Score;
+        scoreValue = teamScore;
+        scoreLabel = `${teamScore} Team Points (${p?.gameScore || 0} Individually)`;
+      }
+
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreValue,
+        scoreLabel,
+        isWinner: winners.includes(id),
+        events: history.map((success, idx) => ({
+          label: `Q${idx + 1}`,
+          success
+        }))
+      };
+    }).sort((a, b) => b.scoreValue - a.scoreValue);
+
+    state.lastGameResult = JSON.stringify({
+      type: "timeline",
+      title: "Trivia Breakdown",
+      timeline
+    });
+
+    const actionScores = answered;
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+      actionScores,
+    };
   }
 }

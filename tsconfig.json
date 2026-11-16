@@ -11,6 +11,7 @@
     "useDefineForClassFields": false
   },
   "include": [
-    "src/**/*"
+    "src/**/*",
+    "tests/**/*"
   ]
 }

@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { emptyGameResult, GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class LumberCut implements IMiniGame {
@@ -58,7 +58,14 @@ export class LumberCut implements IMiniGame {
         team.next = message.side === 'left' ? 'right' : 'left';
         if (message.side === 'right') { 
           // Reaching the right pull concludes a cohesive cross-cut sequence
-          team.pairs++;
+          let inc = 1;
+          if (p.activeEffects) {
+            try {
+              const fx = JSON.parse(p.activeEffects);
+              if (fx.turbo) inc = 1.5;
+            } catch (e) {}
+          }
+          team.pairs += inc;
         }
 
         if (team.pairs >= gameData.targetPairs) {
@@ -78,15 +85,40 @@ export class LumberCut implements IMiniGame {
 
   onTick(state: LobbyState): void {}
 
-  onEnd(state: LobbyState): void {
-    const gameData = JSON.parse(state.players.get(state.selectedPlayers[0])?.gameData || "{}");
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    if (state.selectedPlayers.length === 0) return;
+    const firstPlayer = state.players.get(state.selectedPlayers[0]);
+    if (!firstPlayer) return;
+    let gameData: any = {};
+    try { gameData = JSON.parse(firstPlayer.gameData || "{}"); } catch(e) {}
+    if (gameData.teams) {
+      gameData.teams = gameData.teams.filter((t: any) => !t.members.includes(sessionId));
+      state.selectedPlayers.forEach(id => {
+        const player = state.players.get(id);
+        if (player) player.gameData = JSON.stringify(gameData);
+      });
+    }
+  }
+
+  onEnd(state: LobbyState): GameResult {
+    const connectedSelectedIds = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
+    if (connectedSelectedIds.length === 0) return emptyGameResult();
+
+    let gameData: any = {};
+    try {
+      gameData = JSON.parse(state.players.get(connectedSelectedIds[0])?.gameData || "{}");
+    } catch(e) {}
     let winners: string[] = gameData.winners || [];
+    let tiedIds: string[] = [];
 
     // Fallback: If timer expires without a full log severance, calculate the furthest pairing natively
     if (!gameData.gameOver || winners.length === 0) {
       let maxPairs = -1;
       let winningTeams: any[] = [];
-      gameData.teams.forEach((t: any) => {
+      (gameData.teams || []).forEach((t: any) => {
         if (t.pairs > maxPairs) {
           maxPairs = t.pairs;
           winningTeams = [t];
@@ -96,23 +128,62 @@ export class LumberCut implements IMiniGame {
       });
       
       winners = [];
-      winningTeams.forEach(t => winners.push(...t.members));
+      // Every team still at 0 pairs: nobody cut, so nobody wins.
+      if (maxPairs > 0) {
+        winningTeams.forEach(t => winners.push(...t.members));
+        if (winningTeams.length > 1) tiedIds = [...winners];
+      }
     }
 
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    state.selectedPlayers.forEach(id => {
+    connectedSelectedIds.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         if (winners.includes(id)) {
-          p.score += 3;
           state.lastWinners.push(id);
         } else {
-          p.drinks += 1;
           state.lastLosers.push(id);
         }
       }
     });
+
+    const target = gameData.targetPairs || 20;
+
+    const leaderboard = connectedSelectedIds.map(id => {
+      const p = state.players.get(id);
+      const team = gameData.teams?.find((t: any) => t.members.includes(id));
+      const pairs = team ? team.pairs : 0;
+      const percent = Math.min(100, Math.round((pairs / target) * 100));
+      const scoreLabel = `${percent}% Cut`;
+      
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreValue: percent,
+        scoreLabel,
+        isWinner: state.lastWinners.includes(id)
+      };
+    }).sort((a, b) => b.scoreValue - a.scoreValue);
+
+    state.lastGameResult = JSON.stringify({
+      type: "leaderboard",
+      title: "Lumber Cut Results",
+      leaderboard
+    });
+
+    const actionScores: Record<string, number> = {};
+    connectedSelectedIds.forEach(id => {
+      const team = (gameData.teams || []).find((t: any) => t.members.includes(id));
+      actionScores[id] = team && typeof team.pairs === "number" ? team.pairs : 0;
+    });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+      actionScores,
+    };
   }
 }

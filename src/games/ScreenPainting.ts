@@ -1,0 +1,146 @@
+import { Client } from "@colyseus/core";
+import { GameResult, IMiniGame } from "./IMiniGame";
+import { LobbyState } from "../rooms/schema/LobbyState";
+
+export class ScreenPainting implements IMiniGame {
+  private winnerId: string | null = null;
+
+  onInit(state: LobbyState): void {
+    this.winnerId = null;
+    let colorIndex = 0;
+    state.selectedPlayers.forEach(id => {
+      const p = state.players.get(id);
+      if (p) {
+        p.gameScore = 0;
+        p.gameData = JSON.stringify({ finished: false, colorIndex: colorIndex % 7 });
+        colorIndex++;
+      }
+    });
+  }
+
+  onMessage(client: Client, message: any, state: LobbyState): void {
+    if (!state.selectedPlayers.includes(client.sessionId)) return;
+
+    if (message.action === "progress") {
+      const p = state.players.get(client.sessionId);
+      if (p && !this.winnerId) {
+        p.gameScore = Math.min(100, Math.max(0, message.coverage || 0));
+      }
+    }
+
+    if (message.action === "finished" && !this.winnerId) {
+      this.winnerId = client.sessionId;
+
+      // Update all selected players' game data to mark game as finished and specify the winner
+      state.selectedPlayers.forEach(id => {
+        const player = state.players.get(id);
+        if (player) {
+          if (id === client.sessionId) {
+            player.gameScore = 100;
+          }
+          player.gameData = JSON.stringify({ finished: true, winnerId: client.sessionId });
+        }
+      });
+
+      // End game immediately
+      state.timer = 1; 
+    }
+  }
+
+  onTick(state: LobbyState): void {
+    // No tick logic needed for now
+  }
+
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    if (this.winnerId === sessionId) {
+      this.winnerId = null;
+    }
+  }
+
+  onEnd(state: LobbyState): GameResult {
+    state.lastWinners.clear();
+    state.lastLosers.clear();
+
+    const connectedSelectedIds = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
+    let tiedIds: string[] = [];
+
+    if (this.winnerId) {
+      state.lastWinners.push(this.winnerId);
+
+      connectedSelectedIds.forEach(id => {
+        if (id !== this.winnerId) {
+          state.lastLosers.push(id);
+        }
+      });
+    } else {
+      // Timeout - find player with highest coverage.
+      // A tie keeps the first id in selectedPlayers (strict >), not every tied player.
+      let highestCoverage = -1;
+      let topPlayerId: string | null = null;
+      connectedSelectedIds.forEach(id => {
+        const p = state.players.get(id);
+        const score = p?.gameScore || 0;
+        if (score > highestCoverage) {
+          highestCoverage = score;
+          topPlayerId = id;
+        }
+      });
+
+      if (highestCoverage > 0) {
+        const tied = connectedSelectedIds.filter(id => (state.players.get(id)?.gameScore || 0) === highestCoverage);
+        if (tied.length > 1) tiedIds = tied;
+      }
+
+      if (topPlayerId && highestCoverage > 0) {
+        this.winnerId = topPlayerId;
+        state.lastWinners.push(topPlayerId);
+
+        connectedSelectedIds.forEach(id => {
+          if (id !== topPlayerId) {
+            state.lastLosers.push(id);
+          }
+        });
+      } else {
+        // Everyone loses
+        connectedSelectedIds.forEach(id => {
+          state.lastLosers.push(id);
+        });
+      }
+    }
+
+    // Set leaderboard data for the resolution / results screen
+    const leaderboard = connectedSelectedIds.map(id => {
+      const p = state.players.get(id);
+      const isWinner = id === this.winnerId;
+      const coveragePct = Math.min(100, Math.max(0, p?.gameScore || 0));
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreValue: coveragePct,
+        scoreLabel: `${coveragePct}% Painted`,
+        isWinner
+      };
+    }).sort((a, b) => b.scoreValue - a.scoreValue);
+
+    state.lastGameResult = JSON.stringify({
+      type: "leaderboard",
+      title: "Painting Race Results",
+      leaderboard
+    });
+
+    const actionScores: Record<string, number> = {};
+    connectedSelectedIds.forEach(id => {
+      actionScores[id] = state.players.get(id)?.gameScore || 0;
+    });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+      actionScores,
+    };
+  }
+}

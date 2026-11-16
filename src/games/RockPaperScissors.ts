@@ -1,15 +1,17 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { emptyGameResult, GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 export class RockPaperScissors implements IMiniGame {
   private picks: Map<string, string> = new Map();
+  private roundScores: Map<string, number> = new Map();
   private animationStartTime: number = 0;
   private revealTime: number = 0;
   private isEnded: boolean = false;
 
   onInit(state: LobbyState): void {
     this.picks.clear();
+    this.roundScores.clear();
     this.animationStartTime = 0;
     this.revealTime = 0;
     this.isEnded = false;
@@ -19,7 +21,9 @@ export class RockPaperScissors implements IMiniGame {
       picks: {}, // Visible status only (true/false)
       animationWord: "",
       reveal: false,
-      results: {} // hidden until reveal
+      results: {}, // hidden until reveal
+      scores: {}, // round wins scores
+      gameOver: false
     };
 
     state.selectedPlayers.forEach(id => {
@@ -91,8 +95,10 @@ export class RockPaperScissors implements IMiniGame {
         // Handle resolution
         if (Date.now() - this.revealTime > 2000) {
           const ids = state.selectedPlayers.toArray();
-          const p1 = this.picks.get(ids[0]);
-          const p2 = this.picks.get(ids[1]);
+          const p1Id = ids[0];
+          const p2Id = ids[1];
+          const p1 = this.picks.get(p1Id);
+          const p2 = this.picks.get(p2Id);
 
           if (p1 === p2 && p1 !== undefined) {
              // Tie! Reset for a do-over
@@ -106,10 +112,53 @@ export class RockPaperScissors implements IMiniGame {
                 reveal: false,
                 results: {}
              });
-          } else {
-             // Winner decided!
-             this.isEnded = true;
-             state.timer = 0; // Trigger onEnd
+          } else if (p1 !== undefined && p2 !== undefined) {
+             // Winner decided for the round!
+             const p1Wins = (p1 === "rock" && p2 === "scissors") ||
+                            (p1 === "paper" && p2 === "rock") ||
+                            (p1 === "scissors" && p2 === "paper");
+             const roundWinnerId = p1Wins ? p1Id : p2Id;
+             const roundWinnerName = state.players.get(roundWinnerId)?.name || "Winner";
+
+             const currentScore = this.roundScores.get(roundWinnerId) || 0;
+             const newScore = currentScore + 1;
+             this.roundScores.set(roundWinnerId, newScore);
+
+             const scoresObj: any = {};
+             ids.forEach(id => {
+               scoresObj[id] = this.roundScores.get(id) || 0;
+             });
+
+             if (newScore >= 2) {
+               // Match won!
+               this.isEnded = true;
+               this.broadcast(state, {
+                 scores: scoresObj,
+                 animationWord: `${roundWinnerName} WINS MATCH!`
+               });
+
+               setTimeout(() => {
+                 this.broadcast(state, {
+                   animationWord: "",
+                   reveal: false,
+                   gameOver: true
+                 });
+                 state.timer = 0; // Trigger onEnd
+               }, 2000);
+             } else {
+               // Next round!
+               this.picks.clear();
+               this.animationStartTime = 0;
+               this.revealTime = 0;
+               this.tieResetTime = Date.now();
+               this.broadcast(state, {
+                 picks: {},
+                 scores: scoresObj,
+                 animationWord: `${roundWinnerName} WINS ROUND!`,
+                 reveal: false,
+                 results: {}
+               });
+             }
           }
         }
         return;
@@ -119,46 +168,59 @@ export class RockPaperScissors implements IMiniGame {
     }
   }
 
-  onEnd(state: LobbyState): void {
-    const ids = state.selectedPlayers.toArray();
-    if (ids.length < 2) return;
+  onEnd(state: LobbyState): GameResult {
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+    if (ids.length < 2) return emptyGameResult();
 
     const p1Id = ids[0];
     const p2Id = ids[1];
-    const pick1 = this.picks.get(p1Id);
-    const pick2 = this.picks.get(p2Id);
+    const score1 = this.roundScores.get(p1Id) || 0;
+    const score2 = this.roundScores.get(p2Id) || 0;
 
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    if (!pick1 || !pick2) {
-        // Someone didn't pick in time? (shouldn't happen with our logic but for safety)
-        if (pick1) state.lastWinners.push(p1Id);
-        else if (pick2) state.lastWinners.push(p2Id);
-    } else if (pick1 === pick2) {
-      // Tie at the end of the full timer (60s) should result in no winners
-      // (This is a fallback since onTick handles mid-game ties)
+    let tiedIds: string[] = [];
+    if (score1 > score2 && score1 > 0) {
+      state.lastWinners.push(p1Id);
+      state.lastLosers.push(p2Id);
+    } else if (score2 > score1 && score2 > 0) {
+      state.lastWinners.push(p2Id);
+      state.lastLosers.push(p1Id);
     } else {
-      const p1Wins = (pick1 === "rock" && pick2 === "scissors") ||
-                     (pick1 === "paper" && pick2 === "rock") ||
-                     (pick1 === "scissors" && pick2 === "paper");
-
-      if (p1Wins) {
-        state.lastWinners.push(p1Id);
-        state.lastLosers.push(p2Id);
-      } else {
-        state.lastWinners.push(p2Id);
-        state.lastLosers.push(p1Id);
-      }
+      // Tied or nobody scored (both score 0) -> Both are losers!
+      state.lastLosers.push(p1Id, p2Id);
+      tiedIds = [p1Id, p2Id];
     }
 
-    state.lastWinners.forEach(id => {
+    const leaderboard = ids.map(id => {
       const p = state.players.get(id);
-      if (p) p.score += 3;
+      const isWinner = state.lastWinners.includes(id);
+      const isLoser = state.lastLosers.includes(id);
+      const scoreVal = this.roundScores.get(id) || 0;
+      
+      let label = isWinner ? "Winner!" : isLoser ? "Defeated" : "Tied";
+
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreLabel: `${label} (${scoreVal} Wins)`,
+        isWinner
+      };
+    }).sort((a, b) => (a.isWinner === b.isWinner ? 0 : a.isWinner ? -1 : 1));
+
+    state.lastGameResult = JSON.stringify({
+      type: "elimination",
+      title: "RPS Results",
+      leaderboard
     });
-    state.lastLosers.forEach(id => {
-      const p = state.players.get(id);
-      if (p) p.drinks += 1;
-    });
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+    };
   }
 }

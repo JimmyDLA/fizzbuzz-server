@@ -1,5 +1,5 @@
 import { Client } from "@colyseus/core";
-import { IMiniGame } from "./IMiniGame";
+import { GameResult, IMiniGame } from "./IMiniGame";
 import { LobbyState } from "../rooms/schema/LobbyState";
 
 const generateMathProblem = () => {
@@ -54,10 +54,13 @@ const generateMathProblem = () => {
 
 export class MathProblem implements IMiniGame {
   private currentQuestionIndex: number = 0;
-  private readonly maxQuestions = 3;
+  private readonly maxQuestions = 5;
+  private isTransitioning: boolean = false;
+  private playerHistory = new Map<string, boolean[]>();
 
   onInit(state: LobbyState): void {
     this.currentQuestionIndex = 0;
+    this.isTransitioning = false;
     const puz = generateMathProblem();
     
     const gameData = {
@@ -67,8 +70,12 @@ export class MathProblem implements IMiniGame {
       winnerId: null as string | null,
       gameOver: false,
       isLockedOut: false,
+      isTransitioning: false,
+      roundWinner: "",
+      correctAnswer: puz.correct,
       index: this.currentQuestionIndex,
       wrongAnswers: [] as number[],
+      totalQuestions: this.maxQuestions,
     };
 
     // Seed the identical localized puzzle to all clients efficiently
@@ -77,12 +84,15 @@ export class MathProblem implements IMiniGame {
       if (p) {
         p.gameScore = 0;
         p.gameData = JSON.stringify(gameData);
+        this.playerHistory.set(id, []);
       }
     });
   }
 
   onMessage(client: Client, message: any, state: LobbyState): void {
     if (message.action === "answer") {
+      if (this.isTransitioning) return;
+
       const p = state.players.get(client.sessionId);
       if (!p || !state.selectedPlayers.includes(client.sessionId)) return;
 
@@ -92,68 +102,39 @@ export class MathProblem implements IMiniGame {
 
       if (message.answer === pData.correct) {
         p.gameScore += 1;
-        this.currentQuestionIndex++;
+        this.isTransitioning = true;
 
-        if (this.currentQuestionIndex >= this.maxQuestions) {
-          pData.winnerId = client.sessionId;
-          pData.gameOver = true;
-          
-          state.selectedPlayers.forEach(id => {
-             const player = state.players.get(id);
-             if (player) {
-                const lp = JSON.parse(player.gameData);
-                lp.winnerId = client.sessionId;
-                lp.gameOver = true;
-                lp.index = this.currentQuestionIndex;
-                player.gameData = JSON.stringify(lp);
-             }
-          });
-          state.timer = 1;
-
-        } else {
-          const puz = generateMathProblem();
-          
-          state.selectedPlayers.forEach(id => {
-             const player = state.players.get(id);
-             if (player) {
-                const lp = JSON.parse(player.gameData);
-                lp.question = puz.question;
-                lp.options = puz.options;
-                lp.correct = puz.correct;
-                lp.wrongAnswers = [];
-                lp.isLockedOut = false;
-                lp.index = this.currentQuestionIndex;
-                player.gameData = JSON.stringify(lp);
-             }
-          });
-        }
-      } else {
-        pData.wrongAnswers = pData.wrongAnswers || [];
-        pData.wrongAnswers.push(message.answer);
-        pData.isLockedOut = true;
-        p.gameData = JSON.stringify(pData);
-
-        let allLockedOut = true;
+        this.playerHistory.get(client.sessionId)?.push(true);
         state.selectedPlayers.forEach(id => {
-          const sp = state.players.get(id);
-          if (sp) {
-            let spData: any = {};
-            try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
-            if (!spData.isLockedOut) {
-              allLockedOut = false;
-            }
+          if (id !== client.sessionId) {
+            this.playerHistory.get(id)?.push(false);
           }
         });
 
-        if (allLockedOut) {
+        state.selectedPlayers.forEach(id => {
+          const sp = state.players.get(id);
+          if (sp) {
+            const lp = JSON.parse(sp.gameData || "{}");
+            lp.isTransitioning = true;
+            lp.roundWinner = p.name;
+            lp.correctAnswer = pData.correct;
+            sp.gameData = JSON.stringify(lp);
+          }
+        });
+
+        setTimeout(() => {
+          if (state.phase !== "playing") return;
+          this.isTransitioning = false;
           this.currentQuestionIndex++;
-          
+
           if (this.currentQuestionIndex >= this.maxQuestions) {
             state.selectedPlayers.forEach(id => {
                const player = state.players.get(id);
                if (player) {
                   const lp = JSON.parse(player.gameData);
+                  lp.winnerId = client.sessionId;
                   lp.gameOver = true;
+                  lp.isTransitioning = false;
                   lp.index = this.currentQuestionIndex;
                   player.gameData = JSON.stringify(lp);
                }
@@ -170,11 +151,85 @@ export class MathProblem implements IMiniGame {
                   lp.correct = puz.correct;
                   lp.wrongAnswers = [];
                   lp.isLockedOut = false;
+                  lp.isTransitioning = false;
                   lp.index = this.currentQuestionIndex;
                   player.gameData = JSON.stringify(lp);
                }
             });
           }
+        }, 2500);
+
+      } else {
+        pData.wrongAnswers = pData.wrongAnswers || [];
+        pData.wrongAnswers.push(message.answer);
+        pData.isLockedOut = true;
+        p.gameData = JSON.stringify(pData);
+
+        let allLockedOut = true;
+        state.selectedPlayers.forEach(id => {
+          const sp = state.players.get(id);
+          if (sp && sp.isConnected) {
+            let spData: any = {};
+            try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
+            if (!spData.isLockedOut) {
+              allLockedOut = false;
+            }
+          }
+        });
+
+        if (allLockedOut) {
+          this.isTransitioning = true;
+          
+          state.selectedPlayers.forEach(id => {
+            this.playerHistory.get(id)?.push(false);
+          });
+
+          state.selectedPlayers.forEach(id => {
+            const sp = state.players.get(id);
+            if (sp) {
+              const lp = JSON.parse(sp.gameData || "{}");
+              lp.isTransitioning = true;
+              lp.roundWinner = "Nobody";
+              lp.correctAnswer = pData.correct;
+              sp.gameData = JSON.stringify(lp);
+            }
+          });
+
+          setTimeout(() => {
+            if (state.phase !== "playing") return;
+            this.isTransitioning = false;
+            this.currentQuestionIndex++;
+            
+            if (this.currentQuestionIndex >= this.maxQuestions) {
+              state.selectedPlayers.forEach(id => {
+                 const player = state.players.get(id);
+                 if (player) {
+                    const lp = JSON.parse(player.gameData);
+                    lp.gameOver = true;
+                    lp.isTransitioning = false;
+                    lp.index = this.currentQuestionIndex;
+                    player.gameData = JSON.stringify(lp);
+                 }
+              });
+              state.timer = 1;
+            } else {
+              const puz = generateMathProblem();
+              state.selectedPlayers.forEach(id => {
+                 const player = state.players.get(id);
+                 if (player) {
+                    const lp = JSON.parse(player.gameData);
+                    lp.question = puz.question;
+                    lp.options = puz.options;
+                    lp.correct = puz.correct;
+                    lp.wrongAnswers = [];
+                    lp.isLockedOut = false;
+                    lp.isTransitioning = false;
+                    lp.index = this.currentQuestionIndex;
+                    player.gameData = JSON.stringify(lp);
+                 }
+              });
+            }
+          }, 2500);
         }
       }
     }
@@ -182,9 +237,100 @@ export class MathProblem implements IMiniGame {
 
   onTick(state: LobbyState): void {}
 
-  onEnd(state: LobbyState): void {
+  onPlayerDisconnect(sessionId: string, state: LobbyState): void {
+    this.playerHistory.delete(sessionId);
+    if (this.isTransitioning || state.selectedPlayers.length === 0) return;
+
+    let allLockedOut = true;
+    state.selectedPlayers.forEach(id => {
+      const sp = state.players.get(id);
+      if (sp && sp.isConnected) {
+        let spData: any = {};
+        try { spData = JSON.parse(sp.gameData || "{}"); } catch(e) {}
+        if (!spData.isLockedOut) {
+          allLockedOut = false;
+        }
+      }
+    });
+
+    if (allLockedOut) {
+      this.isTransitioning = true;
+      state.selectedPlayers.forEach(id => {
+        this.playerHistory.get(id)?.push(false);
+      });
+      state.selectedPlayers.forEach(id => {
+        const sp = state.players.get(id);
+        if (sp) {
+          const lp = JSON.parse(sp.gameData || "{}");
+          lp.isTransitioning = true;
+          lp.roundWinner = "Nobody";
+          sp.gameData = JSON.stringify(lp);
+        }
+      });
+      setTimeout(() => {
+        if (state.phase !== "playing") return;
+        this.isTransitioning = false;
+        this.currentQuestionIndex++;
+        if (this.currentQuestionIndex >= this.maxQuestions) {
+          state.selectedPlayers.forEach(id => {
+             const player = state.players.get(id);
+             if (player) {
+                const lp = JSON.parse(player.gameData);
+                lp.gameOver = true;
+                lp.isTransitioning = false;
+                lp.index = this.currentQuestionIndex;
+                player.gameData = JSON.stringify(lp);
+             }
+          });
+          state.timer = 1;
+        } else {
+          const puz = generateMathProblem();
+          state.selectedPlayers.forEach(id => {
+             const player = state.players.get(id);
+             if (player) {
+                const lp = JSON.parse(player.gameData);
+                lp.question = puz.question;
+                lp.options = puz.options;
+                lp.correct = puz.correct;
+                lp.wrongAnswers = [];
+                lp.isLockedOut = false;
+                lp.isTransitioning = false;
+                lp.index = this.currentQuestionIndex;
+                player.gameData = JSON.stringify(lp);
+             }
+          });
+        }
+      }, 2500);
+    }
+  }
+
+  onEnd(state: LobbyState): GameResult {
     let winners: string[] = [];
-    const ids = state.selectedPlayers.toArray();
+    let tiedIds: string[] = [];
+    const ids = state.selectedPlayers
+      .toArray()
+      .filter(id => state.players.has(id) && state.players.get(id)?.isConnected);
+
+    // Answers only. A Turbo +1 by itself is not acting.
+    const answered: Record<string, number> = {};
+    ids.forEach(id => {
+      answered[id] = state.players.get(id)?.gameScore || 0;
+    });
+    const anyoneAnswered = ids.some(id => answered[id] > 0);
+
+    if (anyoneAnswered) {
+      ids.forEach(id => {
+        const p = state.players.get(id);
+        if (p && p.activeEffects) {
+          try {
+            const fx = JSON.parse(p.activeEffects);
+            if (fx.turbo) {
+              p.gameScore += 1;
+            }
+          } catch (e) {}
+        }
+      });
+    }
 
     if (state.currentGameType === "2v2" && ids.length === 4) {
       const t1Score = (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0);
@@ -192,6 +338,7 @@ export class MathProblem implements IMiniGame {
 
       if (t1Score >= t2Score && t1Score > 0) winners.push(ids[0], ids[1]);
       if (t2Score >= t1Score && t2Score > 0) winners.push(ids[2], ids[3]);
+      if (t1Score === t2Score && t1Score > 0) tiedIds = [...winners];
     } else {
       let maxScore = -1;
       ids.forEach(id => {
@@ -207,22 +354,67 @@ export class MathProblem implements IMiniGame {
       });
       // Winners only count if score > 0
       if (maxScore <= 0) winners = [];
+      if (winners.length > 1) tiedIds = [...winners];
     }
 
     state.lastWinners.clear();
     state.lastLosers.clear();
 
-    state.selectedPlayers.forEach(id => {
+    ids.forEach(id => {
       const p = state.players.get(id);
       if (p) {
         if (winners.includes(id)) {
-          p.score += 3;
           state.lastWinners.push(id);
         } else {
-          p.drinks += 1;
           state.lastLosers.push(id);
         }
       }
     });
+
+    const is2v2 = state.currentGameType === "2v2" && ids.length === 4;
+    const t1Score = is2v2 ? (state.players.get(ids[0])?.gameScore || 0) + (state.players.get(ids[1])?.gameScore || 0) : 0;
+    const t2Score = is2v2 ? (state.players.get(ids[2])?.gameScore || 0) + (state.players.get(ids[3])?.gameScore || 0) : 0;
+
+    const timeline = ids.map(id => {
+      const p = state.players.get(id);
+      const history = this.playerHistory.get(id) || [];
+      
+      let scoreValue = p?.gameScore || 0;
+      let scoreLabel = `${scoreValue} Points`;
+
+      if (is2v2) {
+        const isTeam1 = id === ids[0] || id === ids[1];
+        const teamScore = isTeam1 ? t1Score : t2Score;
+        scoreValue = teamScore;
+        scoreLabel = `${teamScore} Team Points (${p?.gameScore || 0} Individually)`;
+      }
+
+      return {
+        playerId: id,
+        playerName: p?.name || "Unknown",
+        scoreValue,
+        scoreLabel,
+        isWinner: winners.includes(id),
+        events: history.map((success, idx) => ({
+          label: `Q${idx + 1}`,
+          success
+        }))
+      };
+    }).sort((a, b) => b.scoreValue - a.scoreValue);
+
+    state.lastGameResult = JSON.stringify({
+      type: "timeline",
+      title: "Math Breakdown",
+      timeline
+    });
+
+    const actionScores = answered;
+
+    return {
+      winners: state.lastWinners.toArray(),
+      losers: state.lastLosers.toArray(),
+      tiedIds,
+      actionScores,
+    };
   }
 }
