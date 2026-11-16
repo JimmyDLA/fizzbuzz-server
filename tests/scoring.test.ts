@@ -6,7 +6,7 @@ import { HotPotato } from "../src/games/HotPotato";
 import { LumberCut } from "../src/games/LumberCut";
 import { MathProblem } from "../src/games/MathProblem";
 import { Perfection } from "../src/games/Perfection";
-import { RockPaperScissors } from "../src/games/RockPaperScissors";
+import { RockPaperScissors, SUDDEN_DEATH_PICK_MS } from "../src/games/RockPaperScissors";
 import { Scrabble } from "../src/games/Scrabble";
 import { ScreenPainting } from "../src/games/ScreenPainting";
 import { SimonSays } from "../src/games/SimonSays";
@@ -31,7 +31,7 @@ import {
  * who tied; LobbyRoom applies +3 and one drink. These quirks are intentional.
  * - Non-RPS ties: every tied player wins, and a 2v2 tie is both teams win.
  * - A score of 0 is not a win. Nobody acting means everyone drinks and nobody gets +3.
- * - RPS final tie or 0-0: both players lose. Battle Royale still scores only the first two ids.
+ * - RPS ties replay until one player wins a throw: no score and no drink for a tied throw or a level match. A strict lead when time expires still wins. Battle Royale still scores only the first two ids.
  * - Hot Potato Battle Royale: everyone except the holder gets +3.
  * - Screen Painting timeout: the earliest selected player at the top coverage wins alone.
  */
@@ -841,6 +841,32 @@ describe("Rock Paper Scissors", () => {
     game.onTick(state);
   }
 
+  function word(state: LobbyState): string {
+    return JSON.parse(player(state, "a").gameData).animationWord;
+  }
+
+  /** One LobbyRoom second: the clock decrements, then the game ticks, then the room scores if timer < -1. */
+  function lobbyTick(game: RockPaperScissors, state: LobbyState): boolean {
+    state.timer -= 1;
+    game.onTick(state);
+    return state.timer < -1;
+  }
+
+  function openSuddenDeathWindow(game: RockPaperScissors, state: LobbyState, advance: (ms: number) => void) {
+    advance(2001);
+    game.onTick(state);
+  }
+
+  function pair(): { type: "1v1"; players: Array<{ id: string; name: string }> } {
+    return {
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+      ],
+    };
+  }
+
   it("first to two round wins gets +3 and the other drinks", () => {
     const state = makeState({
       type: "1v1",
@@ -871,57 +897,557 @@ describe("Rock Paper Scissors", () => {
     });
   });
 
-  it("a 1-1 final tie and a 0-0 both make the two players lose", () => {
-    const tied = makeState({
-      type: "1v1",
-      players: [
-        { id: "a", name: "Ada" },
-        { id: "b", name: "Bea" },
-      ],
-    });
-    const tiedGame = new RockPaperScissors();
-    tiedGame.onInit(tied);
+  it("MIN-006 a tied throw replays and does not score or drink", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
     withClock((advance) => {
-      playRound(tiedGame, tied, "rock", "scissors", advance);
-      playRound(tiedGame, tied, "rock", "paper", advance);
-      finish(tiedGame, tied, {
-        scores: { a: score(0, 1), b: score(0, 1) },
-        winners: [],
-        losers: ["a", "b"],
-        tiedIds: ["a", "b"],
+      game.onMessage(client("a"), { action: "pick", choice: "rock" }, state);
+      game.onMessage(client("b"), { action: "pick", choice: "rock" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+
+      assert.equal(word(state), "TIE! TRY AGAIN...");
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "b").score, 0);
+      assert.equal(player(state, "a").drinks, 0);
+      assert.equal(player(state, "b").drinks, 0);
+      const shown = JSON.parse(player(state, "a").gameData);
+      assert.deepEqual(shown.picks, {});
+      assert.equal(shown.reveal, false);
+      assert.equal(shown.gameOver, false);
+
+      advance(2001);
+      game.onTick(state);
+      playRound(game, state, "rock", "scissors", advance);
+      playRound(game, state, "paper", "rock", advance);
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
         result: {
           type: "elimination",
           title: "RPS Results",
           leaderboard: [
-            { playerId: "a", playerName: "Ada", scoreLabel: "Defeated (1 Wins)", isWinner: false },
+            { playerId: "a", playerName: "Ada", scoreLabel: "Winner! (2 Wins)", isWinner: true },
+            { playerId: "b", playerName: "Bea", scoreLabel: "Defeated (0 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("MIN-006 / SCO-003 a 1-1 when time expires plays sudden death, then pays the decisive throw once", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 30;
+    withClock((advance) => {
+      playRound(game, state, "rock", "scissors", advance);
+      playRound(game, state, "rock", "paper", advance);
+      state.timer = 0;
+      assert.equal(lobbyTick(game, state), false);
+      assert.equal(word(state), "SUDDEN DEATH!");
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "b").drinks, 0);
+      assert.equal(state.timer < -1, false);
+
+      openSuddenDeathWindow(game, state, advance);
+      playRound(game, state, "scissors", "paper", advance);
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "a", playerName: "Ada", scoreLabel: "Winner! (2 Wins)", isWinner: true },
             { playerId: "b", playerName: "Bea", scoreLabel: "Defeated (1 Wins)", isWinner: false },
           ],
         },
       });
     });
+  });
 
-    const none = makeState({
-      type: "1v1",
+  it("MIN-006 / SCO-007 a 0-0 when time expires is not scored until sudden death has a winner", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 1;
+    withClock((advance) => {
+      assert.equal(lobbyTick(game, state), false);
+      assert.notEqual(word(state), "SUDDEN DEATH!");
+      assert.equal(lobbyTick(game, state), false);
+      assert.equal(word(state), "SUDDEN DEATH!");
+      for (let i = 0; i < 30; i++) assert.equal(lobbyTick(game, state), false);
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "b").score, 0);
+      assert.equal(player(state, "a").drinks, 0);
+      assert.equal(player(state, "b").drinks, 0);
+
+      openSuddenDeathWindow(game, state, advance);
+      playRound(game, state, "paper", "rock", advance);
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "a", playerName: "Ada", scoreLabel: "Winner! (1 Wins)", isWinner: true },
+            { playerId: "b", playerName: "Bea", scoreLabel: "Defeated (0 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("SCO-003 same-choice sudden-death throws keep replaying, and a later winner is paid once", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 0;
+    withClock((advance) => {
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+      for (let i = 0; i < 4; i++) {
+        playRound(game, state, "paper", "paper", advance);
+        assert.equal(player(state, "a").score, 0);
+        assert.equal(player(state, "b").drinks, 0);
+        assert.equal(JSON.parse(player(state, "a").gameData).gameOver, false);
+      }
+      playRound(game, state, "rock", "scissors", advance);
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
+      });
+    });
+  });
+
+  it("a sudden-death no-pick loses that throw when the opponent picked", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 0;
+    withClock((advance) => {
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+      game.onMessage(client("b"), { action: "pick", choice: "scissors" }, state);
+      advance(SUDDEN_DEATH_PICK_MS + 1);
+      game.onTick(state);
+      finish(game, state, {
+        scores: { a: score(0, 1), b: score(3) },
+        winners: ["b"],
+        losers: ["a"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "b", playerName: "Bea", scoreLabel: "Winner! (1 Wins)", isWinner: true },
+            { playerId: "a", playerName: "Ada", scoreLabel: "Defeated (0 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("SCO-007 neither player picking replays the throw, with no cap and no score", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 0;
+    withClock((advance) => {
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+      for (let i = 0; i < 4; i++) {
+        advance(SUDDEN_DEATH_PICK_MS + 1);
+        game.onTick(state);
+        assert.equal(word(state), "NO PICK! TRY AGAIN...");
+        assert.equal(player(state, "a").score, 0);
+        assert.equal(player(state, "b").drinks, 0);
+        assert.equal(state.timer < -1, false);
+        openSuddenDeathWindow(game, state, advance);
+      }
+      game.onMessage(client("a"), { action: "pick", choice: "paper" }, state);
+      game.onMessage(client("b"), { action: "pick", choice: "rock" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
+      });
+    });
+  });
+
+  it("a strict 1-0 lead when time expires wins without another throw", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 10;
+    withClock((advance) => {
+      playRound(game, state, "rock", "scissors", advance);
+      state.timer = 0;
+      assert.equal(lobbyTick(game, state), false);
+      assert.equal(state.timer, 0);
+      assert.notEqual(word(state), "SUDDEN DEATH!");
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "a", playerName: "Ada", scoreLabel: "Winner! (1 Wins)", isWinner: true },
+            { playerId: "b", playerName: "Bea", scoreLabel: "Defeated (0 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("a lone pick when regulation time expires wins that throw", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 0;
+    withClock(() => {
+      game.onMessage(client("a"), { action: "pick", choice: "rock" }, state);
+      assert.equal(lobbyTick(game, state), false);
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "a", playerName: "Ada", scoreLabel: "Winner! (1 Wins)", isWinner: true },
+            { playerId: "b", playerName: "Bea", scoreLabel: "Defeated (0 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("the trailing player's lone pick evens the match and sudden death is not scored yet", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 10;
+    withClock((advance) => {
+      playRound(game, state, "rock", "scissors", advance);
+      game.onMessage(client("b"), { action: "pick", choice: "paper" }, state);
+      state.timer = 0;
+      assert.equal(lobbyTick(game, state), false);
+      assert.equal(word(state), "SUDDEN DEATH!");
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "b").drinks, 0);
+      const shown = JSON.parse(player(state, "a").gameData);
+      assert.equal(shown.scores.a, 1);
+      assert.equal(shown.scores.b, 1);
+
+      openSuddenDeathWindow(game, state, advance);
+      playRound(game, state, "rock", "paper", advance);
+      finish(game, state, {
+        scores: { a: score(0, 1), b: score(3) },
+        winners: ["b"],
+        losers: ["a"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "b", playerName: "Bea", scoreLabel: "Winner! (2 Wins)", isWinner: true },
+            { playerId: "a", playerName: "Ada", scoreLabel: "Defeated (1 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("a throw still in progress when time expires is resolved, and a tie continues into sudden death", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 5;
+    withClock((advance) => {
+      game.onMessage(client("a"), { action: "pick", choice: "rock" }, state);
+      game.onMessage(client("b"), { action: "pick", choice: "rock" }, state);
+      advance(3200);
+      state.timer = -1;
+      game.onTick(state);
+      assert.equal(state.timer >= 0, true);
+      advance(2001);
+      game.onTick(state);
+      assert.equal(word(state), "TIE! TRY AGAIN...");
+      assert.equal(player(state, "a").drinks, 0);
+      openSuddenDeathWindow(game, state, advance);
+      assert.equal(word(state), "SUDDEN DEATH!");
+      openSuddenDeathWindow(game, state, advance);
+      playRound(game, state, "scissors", "rock", advance);
+      finish(game, state, {
+        scores: { a: score(0, 1), b: score(3) },
+        winners: ["b"],
+        losers: ["a"],
+        tiedIds: [],
+      });
+    });
+  });
+
+  it("SCO-003 calling onEnd on a level score does not both-lose or pay anyone", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 30;
+    withClock((advance) => {
+      playRound(game, state, "rock", "scissors", advance);
+      playRound(game, state, "rock", "paper", advance);
+      finish(game, state, {
+        scores: { a: score(0), b: score(0) },
+        winners: [],
+        losers: [],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "a", playerName: "Ada", scoreLabel: "Tied (1 Wins)", isWinner: false },
+            { playerId: "b", playerName: "Bea", scoreLabel: "Tied (1 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  function view(state: LobbyState, id: string): any {
+    return JSON.parse(player(state, id).gameData);
+  }
+
+  function dropSelected(state: LobbyState, id: string): void {
+    const idx = state.selectedPlayers.indexOf(id);
+    if (idx !== -1) state.selectedPlayers.splice(idx, 1);
+  }
+
+  it("BR substitute inherits the seat and the paid winner matches the banner", () => {
+    const state = makeState({
+      type: "BR",
       players: [
         { id: "a", name: "Ada" },
         { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
       ],
     });
-    const noneGame = new RockPaperScissors();
-    noneGame.onInit(none);
-    finish(noneGame, none, {
-      scores: { a: score(0, 1), b: score(0, 1) },
-      winners: [],
-      losers: ["a", "b"],
-      tiedIds: ["a", "b"],
-      result: {
-        type: "elimination",
-        title: "RPS Results",
-        leaderboard: [
-          { playerId: "a", playerName: "Ada", scoreLabel: "Defeated (0 Wins)", isWinner: false },
-          { playerId: "b", playerName: "Bea", scoreLabel: "Defeated (0 Wins)", isWinner: false },
-        ],
-      },
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 30;
+    withClock((advance) => {
+      playRound(game, state, "rock", "scissors", advance);
+      playRound(game, state, "rock", "paper", advance);
+      state.timer = 0;
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+
+      dropSelected(state, "a");
+      game.onPlayerDisconnect("a", state);
+
+      const swapped = view(state, "c");
+      assert.equal(swapped.animationWord, "FRESH THROW!");
+      assert.deepEqual(swapped.picks, {});
+      assert.equal(swapped.scores.b, 1);
+      assert.equal(swapped.scores.c, 1);
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "c").drinks, 0);
+
+      game.onMessage(client("b"), { action: "pick", choice: "rock" }, state);
+      game.onMessage(client("c"), { action: "pick", choice: "paper" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      assert.equal(view(state, "c").animationWord, "Cal WINS MATCH!");
+
+      finish(game, state, {
+        scores: { a: score(0), b: score(0, 1), c: score(3) },
+        winners: ["c"],
+        losers: ["b"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "c", playerName: "Cal", scoreLabel: "Winner! (2 Wins)", isWinner: true },
+            { playerId: "b", playerName: "Bea", scoreLabel: "Defeated (1 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("BR substitute gets a fresh throw window instead of the leftover one", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+    });
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 0;
+    withClock((advance) => {
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+      game.onMessage(client("a"), { action: "pick", choice: "rock" }, state);
+      advance(SUDDEN_DEATH_PICK_MS - 1000);
+
+      dropSelected(state, "b");
+      game.onPlayerDisconnect("b", state);
+      assert.equal(view(state, "c").animationWord, "FRESH THROW!");
+      assert.deepEqual(view(state, "c").picks, {});
+
+      advance(2000);
+      game.onTick(state);
+      assert.notEqual(view(state, "a").animationWord, "Ada WINS MATCH!");
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "c").drinks, 0);
+      assert.equal(player(state, "c").score, 0);
+
+      game.onMessage(client("a"), { action: "pick", choice: "scissors" }, state);
+      game.onMessage(client("c"), { action: "pick", choice: "rock" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      assert.equal(view(state, "c").animationWord, "Cal WINS MATCH!");
+
+      finish(game, state, {
+        scores: { a: score(0, 1), b: score(0), c: score(3) },
+        winners: ["c"],
+        losers: ["a"],
+        tiedIds: [],
+        result: {
+          type: "elimination",
+          title: "RPS Results",
+          leaderboard: [
+            { playerId: "c", playerName: "Cal", scoreLabel: "Winner! (1 Wins)", isWinner: true },
+            { playerId: "a", playerName: "Ada", scoreLabel: "Defeated (0 Wins)", isWinner: false },
+          ],
+        },
+      });
+    });
+  });
+
+  it("a non-contestant leaving Battle Royale does not reset the open throw", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+    });
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 0;
+    withClock((advance) => {
+      assert.equal(lobbyTick(game, state), false);
+      openSuddenDeathWindow(game, state, advance);
+      game.onMessage(client("a"), { action: "pick", choice: "paper" }, state);
+      dropSelected(state, "c");
+      game.onPlayerDisconnect("c", state);
+      assert.deepEqual(view(state, "a").picks, { a: true });
+      assert.notEqual(view(state, "a").animationWord, "FRESH THROW!");
+
+      advance(SUDDEN_DEATH_PICK_MS + 1);
+      game.onTick(state);
+      finish(game, state, {
+        scores: { a: score(3), b: score(0, 1), c: score(0) },
+        winners: ["a"],
+        losers: ["b"],
+        tiedIds: [],
+      });
+    });
+  });
+
+  it("a locked throw is scored before a contestant is substituted", () => {
+    const state = makeState({
+      type: "BR",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+    });
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    state.timer = 15;
+    withClock((advance) => {
+      playRound(game, state, "rock", "scissors", advance);
+      game.onMessage(client("a"), { action: "pick", choice: "rock" }, state);
+      game.onMessage(client("b"), { action: "pick", choice: "paper" }, state);
+      advance(1000);
+      game.onTick(state);
+      assert.equal(word(state), "PAPER...");
+
+      dropSelected(state, "a");
+      game.onPlayerDisconnect("a", state);
+
+      const shown = view(state, "c");
+      assert.equal(shown.scores.b, 1);
+      assert.equal(shown.scores.c, 1);
+      assert.equal(shown.animationWord, "FRESH THROW!");
+      assert.equal(player(state, "b").drinks, 0);
+      assert.equal(player(state, "c").score, 0);
+
+      state.timer = 0;
+      assert.equal(lobbyTick(game, state), false);
+      assert.equal(view(state, "b").animationWord, "SUDDEN DEATH!");
+      assert.equal(player(state, "b").drinks, 0);
+      assert.equal(player(state, "c").score, 0);
+    });
+  });
+
+  it("ignores a choice other than rock, paper, or scissors", () => {
+    const state = makeState(pair());
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    withClock((advance) => {
+      game.onMessage(client("a"), { action: "pick", choice: "banana" }, state);
+      game.onMessage(client("b"), { action: "pick", choice: "rock" }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      assert.deepEqual(view(state, "a").picks, { b: true });
+      assert.equal(view(state, "a").reveal, false);
+      assert.equal(player(state, "a").score, 0);
+      assert.equal(player(state, "b").drinks, 0);
+
+      game.onMessage(client("a"), { action: "pick", choice: " ROCK " }, state);
+      advance(3200);
+      game.onTick(state);
+      advance(2001);
+      game.onTick(state);
+      assert.equal(word(state), "TIE! TRY AGAIN...");
+      assert.equal(player(state, "b").drinks, 0);
     });
   });
 
@@ -1878,6 +2404,35 @@ describe("No-action rule", () => {
 });
 
 describe("LobbyRoom", () => {
+  it("a null or non-object game_action does not throw", () => {
+    const room = new LobbyRoom();
+    room.onCreate({});
+    const state = makeState({
+      type: "1v1",
+      players: [
+        { id: "a", name: "Ada" },
+        { id: "b", name: "Bea" },
+      ],
+    });
+    room.setState(state);
+    state.phase = "playing";
+    const game = new RockPaperScissors();
+    game.onInit(state);
+    room.activeGame = game;
+
+    const emit = (message: unknown) => {
+      (room as unknown as { onMessageEvents: { emit: (type: string, client: unknown, message: unknown) => void } })
+        .onMessageEvents.emit("game_action", client("a"), message);
+    };
+    assert.doesNotThrow(() => {
+      emit(null);
+      emit(undefined);
+      emit("pick");
+    });
+    emit({ action: "pick", choice: "rock" });
+    assert.deepEqual(JSON.parse(player(state, "a").gameData).picks, { a: true });
+  });
+
   it("applies +3 per winner and one drink per loser from the game result", () => {
     const state = makeState({
       type: "BR",
