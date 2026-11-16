@@ -76,6 +76,21 @@ function lobbyError(client: FakeClient) {
   return client.sent.find((entry) => entry.type === LOBBY_ERROR_EVENT)?.payload;
 }
 
+function withDevWheel(fn: () => void): void {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousFlag = process.env.ALLOW_DEV_WHEEL;
+  process.env.NODE_ENV = "test";
+  process.env.ALLOW_DEV_WHEEL = "1";
+  try {
+    fn();
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousFlag === undefined) delete process.env.ALLOW_DEV_WHEEL;
+    else process.env.ALLOW_DEV_WHEEL = previousFlag;
+  }
+}
+
 describe("connected player start gate", () => {
   it("counts only connected players and requires two of them", () => {
     const players = {
@@ -129,7 +144,9 @@ describe("lobby start minimum", () => {
     assert.equal(room.state.phase, "chart");
     assert.equal(host.sent.filter((entry) => entry.type === LOBBY_ERROR_EVENT).length, 1);
 
-    emit(room, "dev_start_wheel", host, { type: "BR", category: "Tapping Race", selectedPlayers: ["host"] });
+    withDevWheel(() => {
+      emit(room, "dev_start_wheel", host, { type: "BR", category: "Tapping Race", selectedPlayers: ["host"] });
+    });
 
     assert.equal(room.state.phase, "chart");
     assert.notEqual(room.state.currentGameType, "BR");
@@ -232,10 +249,12 @@ describe("lobby start minimum", () => {
     assert.equal(room.state.currentGameType, "");
     assert.equal(lobbyError(host), undefined);
 
-    emit(room, "dev_start_wheel", host, {
-      type: "BR",
-      category: "Tapping Race",
-      selectedPlayers: ["host", "guest"],
+    withDevWheel(() => {
+      emit(room, "dev_start_wheel", host, {
+        type: "BR",
+        category: "Tapping Race",
+        selectedPlayers: ["host", "guest"],
+      });
     });
     assert.equal(room.state.phase, "chart");
     assert.notEqual(room.state.currentGameType, "BR");

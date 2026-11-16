@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Client } from "@colyseus/core";
-import { LobbyRoom } from "../src/rooms/LobbyRoom";
+import { DEV_WHEEL_ENV, LobbyRoom, isDevWheelEnabled } from "../src/rooms/LobbyRoom";
 import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "../src/rooms/lobbyErrors";
 import { Player } from "../src/rooms/schema/LobbyState";
 
@@ -360,29 +360,82 @@ describe("ready to spin", { concurrency: 1 }, () => {
     }
   });
 
-  it("keeps host-only dev_start_wheel and ignores it from a non-host", () => {
-    const { room, broadcasts, clients } = chartRoom(["ada", "bea"]);
-    emit(room, "dev_start_wheel", clients[1], {
-      type: "1v1",
-      category: "Trivia",
-      selectedPlayers: ["ada", "bea"],
-    });
-    assert.equal(room.state.phase, "chart");
-    assert.equal(spinEvents(broadcasts).length, 0);
+  it("ignores dev_start_wheel when the dev flag is off", () => {
+    assert.equal(isDevWheelEnabled({}), false);
+    assert.equal(isDevWheelEnabled({ NODE_ENV: "production", [DEV_WHEEL_ENV]: "1" }), false);
+    assert.equal(isDevWheelEnabled({ NODE_ENV: "development" }), false);
+    assert.equal(isDevWheelEnabled({ [DEV_WHEEL_ENV]: "1" }), false);
+    assert.equal(isDevWheelEnabled({ NODE_ENV: "test", [DEV_WHEEL_ENV]: "1" }), true);
 
-    emit(room, "dev_start_wheel", clients[0], {
-      type: "1v1",
-      category: "Trivia",
-      selectedPlayers: ["ada", "bea"],
-    });
-    assert.equal(room.state.phase, "wheel");
-    assert.equal(room.state.currentCategory, "Trivia");
-    assert.equal(room.state.currentGameType, "1v1");
-    assert.equal(room.state.timer, 0);
-    assert.equal(room.state.readyCount, 0);
-    assert.equal(room.state.players.get("ada")?.isReady, false);
-    room.checkAllReady();
-    assert.equal(room.state.phase, "wheel");
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousFlag = process.env[DEV_WHEEL_ENV];
+    delete process.env.NODE_ENV;
+    delete process.env[DEV_WHEEL_ENV];
+    try {
+      const { room, broadcasts, clients } = chartRoom(["ada", "bea"]);
+      emit(room, "dev_start_wheel", clients[0], {
+        type: "1v1",
+        category: "Trivia",
+        selectedPlayers: ["ada", "bea"],
+      });
+      assert.equal(room.state.phase, "chart");
+      assert.equal(room.state.currentGameType, "");
+      assert.equal(room.state.currentCategory, "");
+      assert.equal(spinEvents(broadcasts).length, 0);
+      assert.equal(clients[0].sent.find((entry) => entry.type === LOBBY_ERROR_EVENT), undefined);
+
+      process.env.NODE_ENV = "production";
+      process.env[DEV_WHEEL_ENV] = "1";
+      emit(room, "dev_start_wheel", clients[0], {
+        type: "1v1",
+        category: "Trivia",
+        selectedPlayers: ["ada", "bea"],
+      });
+      assert.equal(room.state.phase, "chart");
+      assert.equal(spinEvents(broadcasts).length, 0);
+      assert.equal(clients[0].sent.find((entry) => entry.type === LOBBY_ERROR_EVENT), undefined);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousFlag === undefined) delete process.env[DEV_WHEEL_ENV];
+      else process.env[DEV_WHEEL_ENV] = previousFlag;
+    }
+  });
+
+  it("allows host dev_start_wheel only when the dev flag is on", () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousFlag = process.env[DEV_WHEEL_ENV];
+    process.env.NODE_ENV = "test";
+    process.env[DEV_WHEEL_ENV] = "1";
+    try {
+      const { room, broadcasts, clients } = chartRoom(["ada", "bea"]);
+      emit(room, "dev_start_wheel", clients[1], {
+        type: "1v1",
+        category: "Trivia",
+        selectedPlayers: ["ada", "bea"],
+      });
+      assert.equal(room.state.phase, "chart");
+      assert.equal(spinEvents(broadcasts).length, 0);
+
+      emit(room, "dev_start_wheel", clients[0], {
+        type: "1v1",
+        category: "Trivia",
+        selectedPlayers: ["ada", "bea"],
+      });
+      assert.equal(room.state.phase, "wheel");
+      assert.equal(room.state.currentCategory, "Trivia");
+      assert.equal(room.state.currentGameType, "1v1");
+      assert.equal(room.state.timer, 0);
+      assert.equal(room.state.readyCount, 0);
+      assert.equal(room.state.players.get("ada")?.isReady, false);
+      room.checkAllReady();
+      assert.equal(room.state.phase, "wheel");
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousFlag === undefined) delete process.env[DEV_WHEEL_ENV];
+      else process.env[DEV_WHEEL_ENV] = previousFlag;
+    }
   });
 
   it("lets a Wild Card resolve before the spin without skipping Ready to Play", () => {
