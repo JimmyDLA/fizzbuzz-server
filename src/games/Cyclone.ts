@@ -178,10 +178,17 @@ export class Cyclone implements IMiniGame {
       leaderboard
     });
 
+    const actionScores: Record<string, number> = {};
+    distances.forEach(d => {
+      // A stop counts as action, including a bullseye. Timeout is no action.
+      actionScores[d.id] = d.distance === 999 ? 0 : 1;
+    });
+
     return {
       winners: state.lastWinners.toArray(),
       losers: state.lastLosers.toArray(),
       tiedIds,
+      actionScores,
     };
   }
 }

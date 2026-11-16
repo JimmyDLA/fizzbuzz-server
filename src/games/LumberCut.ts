@@ -128,9 +128,11 @@ export class LumberCut implements IMiniGame {
       });
       
       winners = [];
-      winningTeams.forEach(t => winners.push(...t.members));
-      // Equal progress, including nobody cutting (every team at 0), is a shared win.
-      if (winningTeams.length > 1) tiedIds = [...winners];
+      // Every team still at 0 pairs: nobody cut, so nobody wins.
+      if (maxPairs > 0) {
+        winningTeams.forEach(t => winners.push(...t.members));
+        if (winningTeams.length > 1) tiedIds = [...winners];
+      }
     }
 
     state.lastWinners.clear();
@@ -171,10 +173,17 @@ export class LumberCut implements IMiniGame {
       leaderboard
     });
 
+    const actionScores: Record<string, number> = {};
+    connectedSelectedIds.forEach(id => {
+      const team = (gameData.teams || []).find((t: any) => t.members.includes(id));
+      actionScores[id] = team && typeof team.pairs === "number" ? team.pairs : 0;
+    });
+
     return {
       winners: state.lastWinners.toArray(),
       losers: state.lastLosers.toArray(),
       tiedIds,
+      actionScores,
     };
   }
 }

@@ -107,10 +107,16 @@ export class TappingRace implements IMiniGame {
       leaderboard
     });
 
+    const actionScores: Record<string, number> = {};
+    ids.forEach(id => {
+      actionScores[id] = state.players.get(id)?.gameScore || 0;
+    });
+
     return {
       winners: state.lastWinners.toArray(),
       losers: state.lastLosers.toArray(),
       tiedIds,
+      actionScores,
     };
   }
 }
