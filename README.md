@@ -62,6 +62,7 @@ FizzBuzz is an interactive multiplayer party game where players connect to a sha
 ## Architecture Overview
 
 - **`src/rooms/LobbyRoom.ts`**: The core room where all players connect. Handles the wheel spinning, player readiness, mode selections, and phase transitions (chart -> wheel -> ready -> playing -> resolution).
+- **Room codes:** Each live lobby gets a unique code from `1000` to `9999`. Reservations are per process, in memory. Running multiple server processes would need a shared store such as Redis or Colyseus presence to guarantee unique codes.
 - **`src/rooms/schema/LobbyState.ts`**: The synchronized schema that tracks the players, scores, active game phase, and practice states.
 - **`src/games/`**: Contains the isolated logic for each of the 12 mini-games, implementing the `IMiniGame` interface for consistent `onInit`, `onMessage`, `onTick`, and `onEnd` lifecycle hooks.
 
