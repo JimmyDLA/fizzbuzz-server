@@ -513,7 +513,7 @@ describe("betting round resolution", () => {
       assert.equal(player.betWager, 3, id);
       assert.equal(player.betPayout, 3, id);
       assert.equal(player.betNet, 0, id);
-      assert.equal(player.betRank, 0, id);
+      assert.equal(player.betRank, 1, id);
       assert.equal(player.drinks, 1, id);
     }
     assert.equal(room.state.bettingRefunded, true);
@@ -522,7 +522,7 @@ describe("betting round resolution", () => {
     const [paid] = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
     assert.equal(paid.reason, "no-action");
     assert.equal(paid.refunded, true);
-    assert.equal(paid.payouts.every((entry) => entry.net === 0), true);
+    assert.equal(paid.payouts.every((entry) => entry.net === 0 && entry.rank === 1), true);
   });
 
   it("ranks Hot Potato survivors above the holder and does not also pay +3", () => {
@@ -640,7 +640,6 @@ function assertNoActionRefund(
     assert.equal(player.score, score, `${id} gets their own wager back`);
     assert.equal(player.betPayout, player.betWager, id);
     assert.equal(player.betNet, 0, id);
-    assert.equal(player.betRank, 0, id);
     assert.equal(player.drinks, 1, id);
   }
   assert.deepEqual(
@@ -662,6 +661,8 @@ describe("no-action betting refunds", () => {
     room.applyActiveGameResult();
 
     assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1 });
+    assert.equal(room.state.players.get("ada")?.betRank, 1);
+    assert.equal(room.state.players.get("bea")?.betRank, 1);
     const data = JSON.parse(room.state.players.get(room.state.selectedPlayers[0])!.gameData);
     assert.equal(data.teams.every((team: { pairs: number }) => team.pairs === 0), true);
   });
@@ -680,6 +681,8 @@ describe("no-action betting refunds", () => {
     room.applyActiveGameResult();
 
     assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1 });
+    assert.equal(room.state.players.get("ada")?.betRank, 1);
+    assert.equal(room.state.players.get("bea")?.betRank, 1);
     const data = JSON.parse(room.state.players.get(puller)!.gameData);
     assert.equal(data.teams.every((team: { pairs: number }) => team.pairs === 0), true);
   });
@@ -697,6 +700,8 @@ describe("no-action betting refunds", () => {
       room.applyActiveGameResult();
 
       assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1 });
+      assert.equal(room.state.players.get("ada")?.betRank, 1);
+      assert.equal(room.state.players.get("bea")?.betRank, 2);
       assert.equal(room.state.players.get("ada")?.gameScore, 1);
       assert.equal(room.state.players.get("bea")?.gameScore, 0);
     }
@@ -724,6 +729,7 @@ describe("no-action betting refunds", () => {
     room.applyActiveGameResult();
 
     assertNoActionRefund(room, broadcasts, { ada: 9, bea: 1, cal: 4 });
+    for (const id of ["ada", "bea", "cal"]) assert.equal(room.state.players.get(id)?.betRank, 1, id);
     assert.deepEqual(room.state.lastLosers.toArray().slice().sort(), ["ada", "bea", "cal"]);
   });
 });
@@ -967,6 +973,57 @@ describe("grace, abort, and non-betting rounds", () => {
     assert.equal(second.score, 1);
     assert.equal(first.betPayout + second.betPayout, 3);
     assert.equal(room.state.bettingPot, 3);
+    assert.equal(room.state.bettingRefunded, true);
+    assert.equal(first.betRank, 1);
+    assert.equal(second.betRank, 1);
+  });
+
+  it("pays a leaver's pot by rank when everyone left behind staked 0", async () => {
+    const { room, broadcasts } = bootRoom();
+    addPlayer(room, "ada", { host: true, score: 0 });
+    addPlayer(room, "bea", { score: 0 });
+    addPlayer(room, "cal", { score: 0 });
+    const dee = addPlayer(room, "dee", { score: 9 });
+    room.state.roundCount = 4;
+    room.startWheelPhase();
+    assert.equal(room.state.bettingPot, 3);
+    room.state.phase = "playing";
+    await room.onLeave(dee as unknown as Client, CloseCode.CONSENTED);
+
+    room.state.players.get("ada")!.gameScore = 1;
+    room.state.players.get("bea")!.gameScore = 5;
+    room.state.players.get("cal")!.gameScore = 3;
+    room.state.currentCategory = "Tapping Race";
+    room.activeGame = new TappingRace();
+    room.applyActiveGameResult();
+
+    const ada = room.state.players.get("ada")!;
+    const bea = room.state.players.get("bea")!;
+    const cal = room.state.players.get("cal")!;
+    assert.equal(room.state.bettingRefunded, false);
+    assert.equal(bea.betRank, 1);
+    assert.equal(cal.betRank, 2);
+    assert.equal(ada.betRank, 3);
+    assert.equal(bea.betPayout, 2);
+    assert.equal(cal.betPayout, 1);
+    assert.equal(ada.betPayout, 0);
+    assert.equal(bea.score, 2);
+    assert.equal(cal.score, 1);
+    assert.equal(ada.score, 0);
+    assert.equal(ada.betPayout + bea.betPayout + cal.betPayout, 3);
+    assert.equal(room.state.bettingPot, 3);
+    assert.equal(bea.drinks, 0);
+    assert.equal(cal.drinks, 1);
+    assert.equal(ada.drinks, 1);
+    const hosts = [...room.state.players.values()].filter((player) => player.isHost && player.isConnected);
+    assert.equal(hosts.length, 1);
+    const [paid] = events<BettingPayoutPayload>(broadcasts, BETTING_PAYOUT_EVENT);
+    assert.equal(paid.reason, "payout");
+    assert.equal(paid.refunded, false);
+    assert.deepEqual(
+      paid.payouts.map((entry) => entry.rank),
+      paid.payouts.map((entry) => room.state.players.get(entry.playerId)!.betRank),
+    );
   });
 
   it("resets a settled pot on abort so the replay stakes from the scores already paid", async () => {

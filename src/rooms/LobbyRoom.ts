@@ -1224,7 +1224,8 @@ export class LobbyRoom extends Room {
     const seated = this.bettingPlayerIds.filter((id) => this.state.players.has(id));
 
     if (isNoActionResult(resolved)) {
-      this.refundSeatedStakes("no-action", false);
+      const placements = standingsForPlayers(seated, resolved, this.state.lastGameResult);
+      this.refundSeatedStakes("no-action", false, this.competitionRanks(placements));
       for (const id of seated) {
         const player = this.state.players.get(id);
         if (player) player.drinks += 1;
@@ -1234,16 +1235,14 @@ export class LobbyRoom extends Room {
 
     const placements = standingsForPlayers(seated, resolved, this.state.lastGameResult);
     const seatedStake = seated.reduce((sum, id) => sum + (this.bettingStakes.get(id) ?? 0), 0);
-    // No remaining stake: the pot is only what leavers left behind. Split it
-    // like a refund instead of paying every rank 0 and losing the points.
-    if (seatedStake === 0) {
-      this.refundSeatedStakes("payout", false);
-      this.applyBettingDrinks(placements, resolved);
-      return;
-    }
+    // A scored round still pays by rank when every remaining stake is 0.
+    // The pot is only what a leaver left. Plain rank weights give the winner
+    // the biggest share. A refund is only for no-action or an abort.
     const stakes: Record<string, number> = {};
     for (const id of seated) stakes[id] = this.bettingStakes.get(id) ?? 0;
-    const shares = splitPot(placements, this.state.bettingPot, stakes);
+    const shares = seatedStake === 0
+      ? splitPot(placements, this.state.bettingPot)
+      : splitPot(placements, this.state.bettingPot, stakes);
     this.applyBettingDrinks(placements, resolved);
 
     const payouts: BettingPayoutView[] = [];
@@ -1296,10 +1295,12 @@ export class LobbyRoom extends Room {
    * stake still in the room. If nobody remaining staked, the leavers' stakes
    * are split equally and leftover points follow selection order.
    * The leaver is not paid. The payouts add up to the original pot.
+   * `ranks` is the competition place when this refund still has a board.
    */
   private refundSeatedStakes(
     reason: BettingPayoutReason,
     clearWager: boolean,
+    ranks?: ReadonlyMap<string, number>,
   ): void {
     const seated: Array<{ id: string; player: Player; wager: number; order: number }> = [];
     let leaverPot = 0;
@@ -1353,10 +1354,11 @@ export class LobbyRoom extends Room {
     let returned = 0;
     for (const seat of seated) {
       const payout = seat.wager + (bonus.get(seat.id) ?? 0);
+      const rank = ranks?.get(seat.id) ?? 0;
       seat.player.score += payout;
       seat.player.betPayout = payout;
       seat.player.betNet = payout - seat.wager;
-      seat.player.betRank = 0;
+      seat.player.betRank = rank;
       if (clearWager) {
         seat.player.betWager = 0;
         seat.player.betPayout = 0;
@@ -1369,12 +1371,19 @@ export class LobbyRoom extends Room {
         wager: seat.wager,
         payout,
         net: payout - seat.wager,
-        rank: 0,
+        rank,
       });
     }
     this.state.bettingPot = returned;
     this.state.bettingRefunded = reason === "no-action";
     this.broadcastBettingPayout(reason, true, payouts);
+  }
+
+  /** Competition place from the same rank weights a payout uses. Pot size does not change the place. */
+  private competitionRanks(placements: Placement[]): Map<string, number> {
+    const ranks = new Map<string, number>();
+    for (const share of splitPot(placements, 0)) ranks.set(share.playerId, share.rank);
+    return ranks;
   }
 
   private refundTrackedStakes(reason: Extract<BettingPayoutReason, "aborted" | "unresolved">): void {

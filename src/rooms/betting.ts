@@ -48,7 +48,7 @@ export interface BettingPayoutView {
   /**
    * 1-based competition rank. Tied players share the best rank in the tie
    * (two players tied for 1st are both rank 1, and the next player is rank 3).
-   * 0 when the round was refunded and nobody was placed.
+   * 0 only when the round has no placement, such as an abort.
    */
   rank: number;
 }

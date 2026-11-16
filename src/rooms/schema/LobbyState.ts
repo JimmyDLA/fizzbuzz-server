@@ -27,7 +27,8 @@ export class Player extends Schema {
   @type("number") betNet: number = 0;
   /**
    * 1-based competition rank for this betting round. Ties share the best rank.
-   * 0 until the pot is paid, and 0 when the pot was refunded.
+   * Set whenever the round has a placement, including a no-action board of
+   * all zeros. 0 until then, and 0 after an abort clears the round.
    */
   @type("number") betRank: number = 0;
 }
