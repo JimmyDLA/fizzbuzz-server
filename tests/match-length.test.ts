@@ -803,6 +803,7 @@ describe("podium", { concurrency: 1 }, () => {
     enterChart(room, clients);
     playRounds(room, clients, 9);
     spin(room, clients);
+    const stakeOrder = room.state.selectedPlayers.toArray();
     assert.equal(room.state.roundCount, 9);
     room.startResolutionPhase();
     assert.equal(room.state.roundCount, 10);
@@ -824,15 +825,17 @@ describe("podium", { concurrency: 1 }, () => {
 
     assert.equal(room.state.phase, "gameover");
     assert.equal(closed.count, 1);
-    // Round 10 is a betting round. The spin locked stakes and resolution
-    // never played a game, so the refund returns them. Cal had already left,
-    // and that 1-point stake is shared by the seats that remain. Bea stays
-    // ahead of Ada either way.
-    const podium = podiumFromState(room);
-    assert.deepEqual(podium.map((seat) => seat.playerId), ["bea", "ada"]);
-    assert.deepEqual(podium.map((seat) => seat.place), [1, 2]);
-    assert.equal(podium[0].score + podium[1].score, 13);
-    assert.ok(podium[0].score >= 8);
+    // Round 10 is a betting round. The spin locks 3, 3, and 1. Resolution
+    // never plays a game, so the refund returns those stakes. Cal has already
+    // left, and that 1-point stake goes to whichever of Ada or Bea was seated
+    // first. The podium scores are one of those two exact results.
+    const earliest = stakeOrder.find((id) => id === "ada" || id === "bea");
+    const adaScore = earliest === "ada" ? 5 : 4;
+    const beaScore = earliest === "ada" ? 8 : 9;
+    assert.deepEqual(podiumFromState(room), [
+      { place: 1, playerId: "bea", name: "bea", score: beaScore },
+      { place: 2, playerId: "ada", name: "ada", score: adaScore },
+    ]);
     assert.ok(room.state.players.has("bea"));
     assert.ok(!podiumFromState(room).some((seat) => seat.playerId === "cal"));
 
