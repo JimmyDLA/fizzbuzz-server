@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { ClientState, ErrorCode, Server, matchMaker } from "@colyseus/core";
+import WsWebSocket from "ws";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import { LobbyRoom, RECONNECT_GRACE_SECONDS } from "../src/rooms/LobbyRoom";
 import { PracticeRoom } from "../src/rooms/PracticeRoom";
@@ -417,6 +418,74 @@ describe("LOB-005 room cap", () => {
     }
   });
 
+  it("drops the host with close code 1006, promotes once, and rejects the old host's start_wheel", async () => {
+    const created = await post("/matchmake/create/lobby", { name: "V" });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    const roomId = String(created.json.roomId);
+    const room = () => matchMaker.getLocalRoomById(roomId) as LobbyRoom;
+    const seats: SeatReservation[] = [created.json];
+    for (const name of ["A", "B"]) {
+      const joined = await post(`/matchmake/joinById/${roomId}`, { name });
+      assert.equal(joined.status, 200, JSON.stringify(joined.json));
+      seats.push(joined.json);
+    }
+    const sockets: WsWebSocket[] = [];
+    try {
+      for (const seat of seats) {
+        sockets.push(await openNodeSocket(port, {
+          processId: String(seat.processId),
+          roomId,
+          sessionId: String(seat.sessionId),
+        }, room()));
+      }
+      const hostId = String(seats[0].sessionId);
+      const nextId = String(seats[1].sessionId);
+      assert.deepEqual(hostIds(room()), [hostId]);
+
+      const dropped = room().clients.find((client) => client.sessionId === hostId);
+      const token = (dropped as { reconnectionToken?: string } | undefined)?.reconnectionToken;
+      assert.equal(typeof token, "string");
+
+      const originalLeave = room().onLeave.bind(room());
+      let leaveCode: number | undefined;
+      room().onLeave = (client, code) => {
+        if (client.sessionId === hostId) leaveCode = code;
+        return originalLeave(client, code);
+      };
+      sockets[0].terminate();
+
+      await waitFor(() => leaveCode !== undefined
+        && room().state.players.get(hostId)?.isConnected === false
+        && room().state.players.get(nextId)?.isHost === true);
+      assert.equal(leaveCode, 1006);
+      assert.equal(room().state.players.get(hostId)?.isHost, false);
+      assert.equal(room().state.players.has(hostId), true);
+      assert.deepEqual(hostIds(room()), [nextId]);
+
+      const reconnect = await post(`/matchmake/reconnect/${roomId}`, { reconnectionToken: token });
+      assert.equal(reconnect.status, 200, JSON.stringify(reconnect.json));
+      sockets.push(await openNodeSocket(port, {
+        processId: String(reconnect.json.processId ?? seats[0].processId),
+        roomId,
+        sessionId: hostId,
+        reconnectionToken: token,
+      }, room()));
+      await waitFor(() => room().state.players.get(hostId)?.isConnected === true);
+
+      assert.equal(room().state.players.get(hostId)?.isHost, false);
+      assert.equal(room().state.players.get(nextId)?.isHost, true);
+      assert.deepEqual(hostIds(room()), [nextId]);
+
+      room().state.phase = "chart";
+      emitRoom(room(), "start_wheel", hostId);
+      assert.equal(room().state.phase, "chart");
+      emitRoom(room(), "start_wheel", nextId);
+      assert.equal(room().state.phase, "chart");
+    } finally {
+      await releaseLobby({ roomId, room: room(), seats, sockets: sockets as unknown as WebSocket[] });
+    }
+  });
+
   it("frees the seat immediately when the leave is consented", async () => {
     const filled = await fillLobby(port, post);
     try {
@@ -482,6 +551,46 @@ async function fillLobby(
   }
   await waitFor(() => room().state.players.size === MAX_ROOM_PLAYERS && room().clients.length === MAX_ROOM_PLAYERS);
   return { roomId, room: room(), seats, sockets };
+}
+
+function hostIds(room: LobbyRoom): string[] {
+  const ids: string[] = [];
+  room.state.players.forEach((player, sessionId) => {
+    if (player.isHost) ids.push(sessionId);
+  });
+  return ids;
+}
+
+function emitRoom(room: LobbyRoom, type: string, sessionId: string): void {
+  const client = room.clients.find((entry) => entry.sessionId === sessionId);
+  assert.ok(client, `missing client ${sessionId}`);
+  (room as unknown as {
+    onMessageEvents: { emit: (event: string, ...args: unknown[]) => void };
+  }).onMessageEvents.emit(type, client);
+}
+
+async function openNodeSocket(
+  port: number,
+  seat: { processId: string; roomId: string; sessionId: string; reconnectionToken?: string },
+  room: LobbyRoom,
+): Promise<WsWebSocket> {
+  const token = seat.reconnectionToken ? `&reconnectionToken=${encodeURIComponent(seat.reconnectionToken)}` : "";
+  const ws = new WsWebSocket(
+    `ws://127.0.0.1:${port}/${seat.processId}/${seat.roomId}?sessionId=${seat.sessionId}${token}`,
+  );
+  ws.on("message", (data) => {
+    const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+    if (bytes[0] === 10) ws.send(Buffer.from([10]));
+  });
+  await new Promise<void>((resolve, reject) => {
+    ws.once("open", () => resolve());
+    ws.once("error", () => reject(new Error(`socket failed for ${seat.sessionId}`)));
+  });
+  await waitFor(() => {
+    const client = room.clients.find((entry) => entry.sessionId === seat.sessionId);
+    return client?.state === ClientState.JOINED && room.state.players.has(seat.sessionId);
+  });
+  return ws;
 }
 
 async function openSocket(

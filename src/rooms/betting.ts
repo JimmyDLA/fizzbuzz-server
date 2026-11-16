@@ -105,7 +105,7 @@ export function standingsForPlayers(
   result: GameResult,
   lastGameResult: string,
 ): Placement[] {
-  const rows = leaderboardRows(lastGameResult);
+  const rows = placementRows(lastGameResult);
   const scoreById = new Map<string, number>();
   let usedScores = false;
   if (rows) {
@@ -134,46 +134,88 @@ export function standingsForPlayers(
   }));
 }
 
-function leaderboardRows(lastGameResult: string): LeaderboardRow[] | null {
+function placementRows(lastGameResult: string): LeaderboardRow[] | null {
   if (!lastGameResult) return null;
   try {
-    const parsed = JSON.parse(lastGameResult) as { leaderboard?: unknown };
-    if (!parsed || !Array.isArray(parsed.leaderboard)) return null;
-    return parsed.leaderboard as LeaderboardRow[];
+    const parsed = JSON.parse(lastGameResult) as {
+      leaderboard?: unknown;
+      timeline?: unknown;
+    };
+    if (!parsed) return null;
+    // Tapping, Cyclone, Lumber, Balloon, Simon, Scrabble, Screen Painting, and
+    // Perfection report scoreValue on leaderboard. Math and Trivia report it
+    // on timeline. Hot Potato and Rock Paper Scissors have no scoreValue.
+    for (const key of ["leaderboard", "timeline"] as const) {
+      const rows = parsed[key];
+      if (!Array.isArray(rows)) continue;
+      const scored = (rows as LeaderboardRow[]).filter((row) => (
+        typeof row?.playerId === "string"
+        && typeof row.scoreValue === "number"
+        && Number.isFinite(row.scoreValue)
+      ));
+      if (scored.length > 0) return scored;
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
+function gcd(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const next = x % y;
+    x = y;
+    y = next;
+  }
+  return x || 1;
+}
+
+function lcm(a: number, b: number): number {
+  return (a / gcd(a, b)) * b;
+}
+
 /**
- * Rank-weighted pot split. 1st has weight n, 2nd n−1, ..., last 1.
- * Tied players use the average of the weights for the ranks they occupy.
- * Each share is floored, then leftover points go out one at a time to the
- * largest remainders. An equal remainder goes to the better rank, then to
- * the earlier input order. The shares add up to `pot`.
+ * Stake-weighted pot split. Rank weight is n for 1st down to 1 for last.
+ * Tied players keep the average of the weights for the ranks they occupy.
+ * payout = pot × (stake × weight) / Σ(stake × weight). A stake of 0 pays 0.
+ * When every stake is 0 the shares are 0, which is a refund. Each share is
+ * floored, then leftover points go to the largest remainders. An equal
+ * remainder goes to the better rank, then to the earlier input order.
+ * Equal stakes reproduce the rank table. The shares add up to `pot`.
  */
-export function splitPot(placements: readonly Placement[], pot: number): PayoutShare[] {
+export function splitPot(
+  placements: readonly Placement[],
+  pot: number,
+  stakes?: Readonly<Record<string, number>>,
+): PayoutShare[] {
   const n = placements.length;
   if (n === 0) return [];
 
-  const totalWeight = (n * (n + 1)) / 2;
   const safePot = Number.isFinite(pot) ? Math.max(0, Math.floor(pot)) : 0;
-  const ordered = placements.map((placement, order) => ({ ...placement, order }));
+  const ordered = placements.map((placement, order) => ({
+    ...placement,
+    order,
+    stake: stakes
+      ? Math.max(0, Math.floor(stakes[placement.playerId] ?? 0))
+      : 1,
+  }));
   ordered.sort((a, b) => {
     if (a.standing !== b.standing) return b.standing - a.standing;
     return a.order - b.order;
   });
 
-  interface Row {
+  interface Member {
     playerId: string;
     rank: number;
-    floor: number;
-    remNum: number;
-    remDen: number;
+    stake: number;
+    weightNum: number;
+    weightDen: number;
     order: number;
   }
 
-  const rows: Row[] = [];
+  const members: Member[] = [];
   let index = 0;
   while (index < ordered.length) {
     const standing = ordered[index].standing;
@@ -183,38 +225,52 @@ export function splitPot(placements: readonly Placement[], pot: number): PayoutS
     const groupSize = end - index;
     let weightSum = 0;
     for (let offset = 0; offset < groupSize; offset += 1) {
-      const rank = startRank + offset;
-      weightSum += n - rank + 1;
+      weightSum += n - (startRank + offset) + 1;
     }
-    const denominator = groupSize * totalWeight;
-    const numerator = safePot * weightSum;
-    const floor = Math.floor(numerator / denominator);
-    const remNum = numerator % denominator;
     for (let cursor = index; cursor < end; cursor += 1) {
-      rows.push({
+      members.push({
         playerId: ordered[cursor].playerId,
         rank: startRank,
-        floor,
-        remNum,
-        remDen: denominator,
+        stake: ordered[cursor].stake,
+        weightNum: weightSum,
+        weightDen: groupSize,
         order: ordered[cursor].order,
       });
     }
     index = end;
   }
 
+  const scale = members.reduce((acc, member) => lcm(acc, member.weightDen), 1);
+  const weighted = members.map((member) => (
+    member.stake * member.weightNum * (scale / member.weightDen)
+  ));
+  const weightTotal = weighted.reduce((sum, value) => sum + value, 0);
+  if (weightTotal === 0 || safePot === 0) {
+    return members.map((member) => ({
+      playerId: member.playerId,
+      rank: member.rank,
+      payout: 0,
+    }));
+  }
+
+  const rows = members.map((member, memberIndex) => {
+    const numerator = safePot * weighted[memberIndex];
+    return {
+      ...member,
+      floor: Math.floor(numerator / weightTotal),
+      remainder: numerator % weightTotal,
+    };
+  });
   let leftover = safePot - rows.reduce((sum, row) => sum + row.floor, 0);
   const byRemainder = [...rows].sort((a, b) => {
-    const left = a.remNum * b.remDen;
-    const right = b.remNum * a.remDen;
-    if (left !== right) return right - left;
+    if (a.remainder !== b.remainder) return b.remainder - a.remainder;
     if (a.rank !== b.rank) return a.rank - b.rank;
     return a.order - b.order;
   });
-
   const extra = new Map<string, number>();
   for (const row of byRemainder) {
     if (leftover <= 0) break;
+    if (row.stake === 0) continue;
     extra.set(row.playerId, (extra.get(row.playerId) ?? 0) + 1);
     leftover -= 1;
   }

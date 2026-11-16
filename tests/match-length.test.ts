@@ -15,6 +15,7 @@ import {
   ROUND_CHOICES,
   SET_ROUNDS_MESSAGE,
   buildPodium,
+  upcomingRoundNumber,
 } from "../src/rooms/matchLength";
 import { Player } from "../src/rooms/schema/LobbyState";
 
@@ -26,6 +27,8 @@ interface SentMessage {
 interface Broadcast {
   type: string;
   payload: unknown;
+  phase: string;
+  podiumLength: number;
 }
 
 interface FakeClient {
@@ -37,21 +40,40 @@ interface FakeClient {
 
 interface CloseSpy {
   count: number;
+  phase: string;
+  podiumLength: number;
 }
 
-function bootRoom(): { room: LobbyRoom; broadcasts: Broadcast[]; closed: CloseSpy } {
+function bootRoom(): { room: LobbyRoom; broadcasts: Broadcast[]; closed: CloseSpy; timeline: string[] } {
   const room = new LobbyRoom();
   room.onCreate({});
   const broadcasts: Broadcast[] = [];
+  const timeline: string[] = [];
+  const patch = room.broadcastPatch.bind(room);
+  room.broadcastPatch = (() => {
+    timeline.push(`patch:${room.state.phase}:${room.state.podium.length}`);
+    return patch();
+  }) as LobbyRoom["broadcastPatch"];
   room.broadcast = ((type: string, payload?: unknown) => {
-    broadcasts.push({ type, payload });
+    if (type === GAME_OVER_EVENT) {
+      timeline.push(`event:${room.state.phase}:${room.state.podium.length}`);
+    }
+    broadcasts.push({
+      type,
+      payload,
+      phase: room.state.phase,
+      podiumLength: room.state.podium.length,
+    });
   }) as LobbyRoom["broadcast"];
-  const closed: CloseSpy = { count: 0 };
+  const closed: CloseSpy = { count: 0, phase: "", podiumLength: -1 };
   room.disconnect = (() => {
     closed.count += 1;
+    closed.phase = room.state.phase;
+    closed.podiumLength = room.state.podium.length;
+    timeline.push(`close:${room.state.phase}:${room.state.podium.length}`);
     return Promise.resolve();
   }) as LobbyRoom["disconnect"];
-  return { room, broadcasts, closed };
+  return { room, broadcasts, closed, timeline };
 }
 
 function addPlayer(
@@ -104,7 +126,7 @@ function seat(
   ids: string[],
   options: { scores?: Record<string, number>; drinks?: Record<string, number>; totalRounds?: number } = {},
 ) {
-  const { room, broadcasts, closed } = bootRoom();
+  const { room, broadcasts, closed, timeline } = bootRoom();
   const clients = ids.map((id, index) => addPlayer(room, id, {
     name: id,
     host: index === 0,
@@ -114,7 +136,7 @@ function seat(
   if (options.totalRounds !== undefined) {
     room.state.totalRounds = options.totalRounds;
   }
-  return { room, broadcasts, closed, clients };
+  return { room, broadcasts, closed, clients, timeline };
 }
 
 function enterChart(room: LobbyRoom, clients: FakeClient[]): void {
@@ -131,9 +153,9 @@ function spin(room: LobbyRoom, clients: FakeClient[]): void {
   assert.equal(room.state.phase, "wheel");
 }
 
-/** Leave resolution the way contestants do, after card effects have had their window. */
-function leaveResolution(room: LobbyRoom, clients: FakeClient[]): void {
-  room.state.phase = "resolution";
+/** Contestants ready out of a resolution that has already started. */
+function readyOutOfResolution(room: LobbyRoom, clients: FakeClient[]): void {
+  assert.equal(room.state.phase, "resolution");
   const selected = room.state.selectedPlayers.toArray();
   for (const id of selected) {
     const player = room.state.players.get(id);
@@ -145,13 +167,16 @@ function leaveResolution(room: LobbyRoom, clients: FakeClient[]): void {
   }
 }
 
-function playRounds(room: LobbyRoom, clients: FakeClient[], count: number, onChart?: (round: number) => void): void {
+function playRounds(room: LobbyRoom, clients: FakeClient[], count: number, onChart?: (roundCount: number) => void): void {
   for (let offset = 0; offset < count; offset += 1) {
-    const round = room.state.roundCount;
-    onChart?.(round);
+    const completed = room.state.roundCount;
+    onChart?.(completed);
     spin(room, clients);
-    assert.equal(room.state.roundCount, round, "the wheel does not advance the round");
-    leaveResolution(room, clients);
+    assert.equal(room.state.roundCount, completed, "the wheel does not advance roundCount");
+    room.startResolutionPhase();
+    assert.equal(room.state.roundCount, completed + 1, "resolution start is the only increment");
+    assert.equal(room.state.phase, "resolution");
+    readyOutOfResolution(room, clients);
   }
 }
 
@@ -178,18 +203,29 @@ function beginGrace(room: LobbyRoom, client: FakeClient): Promise<unknown> {
   return room.onLeave(client as unknown as Client, 1006);
 }
 
-async function finishGrace(room: LobbyRoom, client: FakeClient, pending: Promise<unknown>): Promise<void> {
+async function finishGrace(
+  room: LobbyRoom,
+  client: FakeClient,
+  pending: Promise<unknown>,
+  reconnect = false,
+): Promise<void> {
   const token = (client as FakeClient & { reconnectionToken?: string }).reconnectionToken ?? "";
   const internal = room as unknown as {
-    _reconnections: Record<string, [string, { reject: (value: unknown) => void }]>;
+    _reconnections: Record<string, [string, { resolve: (value: unknown) => void; reject: (value: unknown) => void }]>;
     _reservedSeatTimeouts?: Record<string, ReturnType<typeof setTimeout>>;
+    _autoDisposeTimeout?: ReturnType<typeof setTimeout>;
   };
   const timer = internal._reservedSeatTimeouts?.[client.sessionId];
   if (timer) clearTimeout(timer);
   const entry = internal._reconnections[token];
   assert.ok(entry, "grace reservation was not armed");
-  entry[1].reject(false);
+  if (reconnect) {
+    entry[1].resolve({ sessionId: client.sessionId, reconnectionToken: token });
+  } else {
+    entry[1].reject(false);
+  }
   await pending;
+  if (internal._autoDisposeTimeout) clearTimeout(internal._autoDisposeTimeout);
 }
 
 function useManualTimers() {
@@ -282,12 +318,50 @@ describe("match length", { concurrency: 1 }, () => {
     assert.deepEqual(lobbyError(guest), notHostError());
   });
 
+  it("rejects set_rounds from a former host after they reconnect", async () => {
+    const { room, clients } = seat(["ada", "bea"]);
+    const former = clients[0];
+    const guest = clients[1];
+    assert.equal(room.state.players.get("ada")?.isHost, true);
+    assert.equal(room.state.players.get("bea")?.isHost, false);
+
+    const pending = beginGrace(room, former);
+    assert.equal(room.state.players.get("ada")?.isConnected, false);
+    assert.equal(room.state.players.get("ada")?.isHost, false);
+    assert.equal(room.state.players.get("bea")?.isHost, true);
+    assert.equal(room.state.phase, "lobby");
+
+    await finishGrace(room, former, pending, true);
+
+    assert.equal(room.state.players.get("ada")?.isConnected, true);
+    assert.equal(room.state.players.get("ada")?.isHost, false);
+    assert.equal(room.state.players.get("bea")?.isHost, true);
+    assert.equal(room.state.phase, "lobby");
+
+    setRounds(room, former, 20);
+    assert.equal(room.state.totalRounds, 10);
+    assert.deepEqual(lobbyError(former), notHostError());
+
+    setRounds(room, guest, 30);
+    assert.equal(room.state.totalRounds, 30);
+    assert.equal(lobbyError(guest), undefined);
+
+    const ada = room.state.players.get("ada");
+    assert.ok(ada);
+    ada.isHost = true;
+    setRounds(room, former, 40);
+    setRounds(room, guest, 50);
+    assert.equal(room.state.totalRounds, 30);
+    assert.deepEqual(lobbyError(former), notHostError());
+    assert.deepEqual(lobbyError(guest), notHostError());
+  });
+
   it("locks the length once the room leaves the lobby and keeps it for a late joiner", () => {
     const { room, clients } = seat(["ada", "bea"]);
     const host = clients[0];
     setRounds(room, host, 40);
     enterChart(room, clients);
-    assert.equal(room.state.roundCount, 1);
+    assert.equal(room.state.roundCount, 0);
     assert.equal(room.state.totalRounds, 40);
 
     setRounds(room, host, 50);
@@ -309,7 +383,7 @@ describe("match length", { concurrency: 1 }, () => {
     room.clients.push(cal as unknown as LobbyRoom["clients"][number]);
     room.onJoin(cal as unknown as Client, { name: "Cal" });
     assert.equal(room.state.totalRounds, 40);
-    assert.equal(room.state.roundCount, 1);
+    assert.equal(room.state.roundCount, 0);
     assert.equal(room.state.phase, "chart");
   });
 
@@ -321,7 +395,7 @@ describe("match length", { concurrency: 1 }, () => {
       emit(room, type, clients[1], { rounds: 10 });
     }
     assert.equal(room.state.phase, "chart");
-    assert.equal(room.state.roundCount, 1);
+    assert.equal(room.state.roundCount, 0);
     assert.equal(closed.count, 0);
     assert.equal(gameOvers(broadcasts).length, 0);
     assert.equal(spins(broadcasts).length, 0);
@@ -329,19 +403,38 @@ describe("match length", { concurrency: 1 }, () => {
 });
 
 describe("round counter", { concurrency: 1 }, () => {
-  it("shows the upcoming round on the chart and keeps it through the wheel", () => {
+  it("increments roundCount only when resolution starts", () => {
     const { room, clients, broadcasts } = seat(["ada", "bea"]);
     assert.equal(room.state.roundCount, 0);
     enterChart(room, clients);
+    assert.equal(room.state.roundCount, 0);
+    assert.equal(upcomingRoundNumber(room.state.roundCount), 1);
+
+    spin(room, clients);
+    assert.equal(room.state.phase, "wheel");
+    assert.equal(room.state.roundCount, 0);
+    assert.equal(spins(broadcasts).length, 1);
+    room.checkAllReady();
+    assert.equal(room.state.roundCount, 0);
+
+    room.state.phase = "countdown";
+    assert.equal(room.state.roundCount, 0);
+    room.state.phase = "playing";
+    assert.equal(room.state.roundCount, 0);
+
+    room.startResolutionPhase();
+    assert.equal(room.state.phase, "resolution");
     assert.equal(room.state.roundCount, 1);
-    assert.equal(room.state.totalRounds, 10);
+    readyOutOfResolution(room, clients);
+    assert.equal(room.state.phase, "chart");
+    assert.equal(room.state.roundCount, 1);
+    assert.equal(upcomingRoundNumber(room.state.roundCount), 2);
 
     spin(room, clients);
     assert.equal(room.state.roundCount, 1);
-    assert.equal(spins(broadcasts).length, 1);
-    room.checkAllReady();
-    assert.equal(room.state.phase, "wheel");
-    assert.equal(room.state.roundCount, 1);
+    room.startResolutionPhase();
+    assert.equal(room.state.roundCount, 2);
+    assert.equal(room.state.phase, "resolution");
   });
 
   it("does not advance when a respin or a wild card replaces the wheel", () => {
@@ -355,9 +448,9 @@ describe("round counter", { concurrency: 1 }, () => {
       emit(room, "use_card", clients[0], { cardId: "RESPIN" });
       timers.flush();
       assert.equal(room.state.phase, "wheel");
-      assert.equal(room.state.roundCount, 1);
+      assert.equal(room.state.roundCount, 0);
       timers.flush();
-      assert.equal(room.state.roundCount, 1);
+      assert.equal(room.state.roundCount, 0);
 
       const cal = room.state.players.get("cal");
       assert.ok(cal);
@@ -371,9 +464,9 @@ describe("round counter", { concurrency: 1 }, () => {
       timers.flush();
       assert.equal(room.state.phase, "wheel");
       assert.equal(room.state.currentCategory, "Trivia");
-      assert.equal(room.state.roundCount, 1);
+      assert.equal(room.state.roundCount, 0);
       timers.flush();
-      assert.equal(room.state.roundCount, 1);
+      assert.equal(room.state.roundCount, 0);
     } finally {
       timers.restore();
     }
@@ -382,6 +475,9 @@ describe("round counter", { concurrency: 1 }, () => {
   it("replays an aborted round at the same number", async () => {
     const { room, clients, broadcasts } = seat(["ada", "bea", "cal"]);
     enterChart(room, clients);
+    playRounds(room, clients, 1);
+    assert.equal(room.state.phase, "chart");
+    assert.equal(room.state.roundCount, 1);
     spin(room, clients);
     assert.equal(room.state.roundCount, 1);
 
@@ -395,19 +491,22 @@ describe("round counter", { concurrency: 1 }, () => {
     assert.equal(room.state.phase, "chart");
     assert.equal(room.state.roundCount, 1);
     assert.equal(room.state.totalRounds, 10);
-    assert.equal(spins(broadcasts).length, 1);
+    assert.equal(spins(broadcasts).length, 2);
 
     spin(room, [clients[0], clients[2]]);
     assert.equal(room.state.phase, "wheel");
     assert.equal(room.state.roundCount, 1);
-    assert.equal(spins(broadcasts).length, 2);
+    assert.equal(spins(broadcasts).length, 3);
   });
 
   it("keeps the round count when the host seat moves mid-match", async () => {
     const { room, clients } = seat(["ada", "bea", "cal"]);
     setRounds(room, clients[0], 20);
     enterChart(room, clients);
+    playRounds(room, clients, 1);
+    assert.equal(room.state.roundCount, 1);
     spin(room, clients);
+    assert.equal(room.state.roundCount, 1);
     room.state.phase = "playing";
     const hostIndex = room.state.selectedPlayers.indexOf("ada");
     if (hostIndex >= 0) room.state.selectedPlayers.splice(hostIndex, 1);
@@ -426,7 +525,7 @@ describe("round counter", { concurrency: 1 }, () => {
   it("deals the every-third-round cards from the displayed round number", () => {
     const { room, clients } = seat(["ada", "bea"]);
     enterChart(room, clients);
-    room.state.roundCount = 3;
+    room.state.roundCount = 2;
     const sent: string[] = [];
     for (const client of clients) {
       client.send = (type: string) => {
@@ -444,19 +543,21 @@ describe("round counter", { concurrency: 1 }, () => {
     setRounds(room, clients[0], 15);
     enterChart(room, clients);
     const bettingRounds: number[] = [];
-    playRounds(room, clients, 10, (round) => {
-      if (round % 5 === 0) bettingRounds.push(round);
+    playRounds(room, clients, 10, (completed) => {
+      const aboutToPlay = upcomingRoundNumber(completed);
+      if (aboutToPlay % 5 === 0) bettingRounds.push(aboutToPlay);
       assert.notEqual(room.state.phase, "gameover");
     });
     assert.deepEqual(bettingRounds, [5, 10]);
     assert.equal(room.state.phase, "chart");
-    assert.equal(room.state.roundCount, 11);
+    assert.equal(room.state.roundCount, 10);
     assert.equal(closed.count, 0);
     assert.equal(gameOvers(broadcasts).length, 0);
     assert.equal(spins(broadcasts).length, 10);
 
-    playRounds(room, clients, 5, (round) => {
-      if (round % 5 === 0) bettingRounds.push(round);
+    playRounds(room, clients, 5, (completed) => {
+      const aboutToPlay = upcomingRoundNumber(completed);
+      if (aboutToPlay % 5 === 0) bettingRounds.push(aboutToPlay);
     });
     assert.deepEqual(bettingRounds, [5, 10, 15]);
     assert.equal(room.state.phase, "gameover");
@@ -537,7 +638,7 @@ describe("podium", { concurrency: 1 }, () => {
   });
 
   it("closes after the default 10 rounds with a two-place podium", () => {
-    const { room, clients, closed, broadcasts } = seat(["ada", "bea"], {
+    const { room, clients, closed, broadcasts, timeline } = seat(["ada", "bea"], {
       scores: { ada: 8, bea: 2 },
       drinks: { ada: 0, bea: 6 },
     });
@@ -545,14 +646,25 @@ describe("podium", { concurrency: 1 }, () => {
     enterChart(room, clients);
     playRounds(room, clients, 9);
     assert.equal(room.state.phase, "chart");
-    assert.equal(room.state.roundCount, 10);
+    assert.equal(room.state.roundCount, 9);
+    assert.equal(room.state.podium.length, 0);
     assert.equal(closed.count, 0);
 
     spin(room, clients);
+    assert.equal(room.state.roundCount, 9);
+    room.startResolutionPhase();
+    assert.equal(room.state.phase, "resolution");
     assert.equal(room.state.roundCount, 10);
-    leaveResolution(room, clients);
+    assert.equal(room.state.podium.length, 0);
+    assert.equal(closed.count, 0);
+    readyOutOfResolution(room, clients);
 
     assert.equal(room.state.phase, "gameover");
+    assert.deepEqual(timeline, ["patch:gameover:2", "event:gameover:2", "close:gameover:2"]);
+    assert.equal(closed.phase, "gameover");
+    assert.equal(closed.podiumLength, 2);
+    assert.equal(gameOvers(broadcasts)[0].phase, "gameover");
+    assert.equal(gameOvers(broadcasts)[0].podiumLength, 2);
     assert.equal(room.state.roundCount, 10);
     assert.equal(room.state.totalRounds, 10);
     assert.equal(closed.count, 1);
@@ -597,8 +709,9 @@ describe("podium", { concurrency: 1 }, () => {
     const dee = room.state.players.get("dee");
     assert.ok(dee);
     dee.isConnected = false;
-
-    leaveResolution(room, clients);
+    room.startResolutionPhase();
+    assert.equal(room.state.roundCount, 10);
+    readyOutOfResolution(room, clients);
 
     const expected = [
       { place: 1, playerId: "ada", name: "ada", score: 12 },
@@ -626,7 +739,10 @@ describe("podium", { concurrency: 1 }, () => {
     enterChart(room, clients);
     playRounds(room, clients, 9);
     spin(room, clients);
-    room.state.phase = "resolution";
+    assert.equal(room.state.roundCount, 9);
+    room.startResolutionPhase();
+    assert.equal(room.state.roundCount, 10);
+    assert.equal(room.state.phase, "resolution");
     room.state.selectedPlayers.clear();
     room.state.selectedPlayers.push("ada", "bea");
 
@@ -640,7 +756,7 @@ describe("podium", { concurrency: 1 }, () => {
     assert.equal(room.state.phase, "resolution");
     assert.equal(room.state.roundCount, 10);
 
-    leaveResolution(room, clients);
+    readyOutOfResolution(room, clients);
 
     assert.equal(room.state.phase, "gameover");
     assert.equal(closed.count, 1);
@@ -659,7 +775,7 @@ describe("podium", { concurrency: 1 }, () => {
     enterChart(room, clients);
     playRounds(room, clients, 9);
     spin(room, clients);
-    assert.equal(room.state.roundCount, 10);
+    assert.equal(room.state.roundCount, 9);
 
     const ada = room.state.players.get("ada");
     const bea = room.state.players.get("bea");
@@ -672,6 +788,7 @@ describe("podium", { concurrency: 1 }, () => {
     room.state.lastLosers.push("bea");
 
     room.startResolutionPhase();
+    assert.equal(room.state.roundCount, 10);
     assert.equal(ada.score, 6);
     assert.equal(ada.activeEffects, "");
     assert.equal(room.state.phase, "resolution");
@@ -684,8 +801,9 @@ describe("podium", { concurrency: 1 }, () => {
     assert.equal(room.state.phase, "resolution");
     assert.equal(closed.count, 0);
 
-    leaveResolution(room, clients);
+    readyOutOfResolution(room, clients);
     assert.equal(room.state.phase, "gameover");
+    assert.equal(room.state.roundCount, 10);
     assert.equal(closed.count, 1);
     assert.deepEqual(podiumFromState(room), [
       { place: 1, playerId: "ada", name: "ada", score: 6 },

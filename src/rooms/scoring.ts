@@ -75,13 +75,6 @@ export function applyDrinks(state: LobbyState, result: GameResult): void {
   }
 }
 
-/** No-action rewrite, then the shared +3 / +1 drink payout. */
-export function scoreGameResult(state: LobbyState, result: GameResult): GameResult {
-  const resolved = applyNoActionRound(state, result);
-  applyStandardScoring(state, resolved);
-  return resolved;
-}
-
 /**
  * Extra +3 for each winning player who has Double Points active.
  * Applied at resolution, after the standard +3, so a winning holder ends at +6.

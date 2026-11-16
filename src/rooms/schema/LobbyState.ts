@@ -51,11 +51,11 @@ export class LobbyState extends Schema {
   @type(["string"]) lastLosers = new ArraySchema<string>();
   @type("string") lastGameResult: string = "";
   /**
-   * Round X in "Round X/N". 0 while the room is still in the lobby.
-   * Becomes 1 when the room first reaches the chart, then stays on that
-   * number through the wheel, countdown, play, and resolution. A non-final
-   * resolution advances it to the next round as the room returns to the chart.
-   * An aborted round keeps the same number so it is replayed.
+   * Resolutions that have started. Same increment as master: +1 at the
+   * start of resolution, before specialty cards are dealt. Unchanged during
+   * lobby, chart, wheel, countdown, and playing, and unchanged when a round
+   * aborts before resolution. Round X/N is `roundCount` during resolution
+   * and gameover, and `roundCount + 1` during chart, wheel, countdown, and playing.
    */
   @type("number") roundCount: number = 0;
   /** Host-chosen match length. Default 10. One of 10, 15, 20, 30, 40, 50. */
@@ -67,8 +67,8 @@ export class LobbyState extends Schema {
   /** Connected players. Disconnected seats are excluded from the ready count. */
   @type("number") connectedCount: number = 0;
   /**
-   * True while the displayed round is a betting round (roundCount is a positive
-   * multiple of 5), including the chart before the spin and a final round.
+   * True while the round on screen is a betting round. Before resolution that
+   * round is roundCount + 1. During resolution and gameover it is roundCount.
    * The app shows the "Betting round" banner from this flag.
    */
   @type("boolean") isBettingRound: boolean = false;
