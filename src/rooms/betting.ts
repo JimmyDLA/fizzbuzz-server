@@ -166,13 +166,14 @@ function placementRows(lastGameResult: string): LeaderboardRow[] | null {
  * take the weight of the best rank they share. A stake of 0 pays 0.
  * Exact share is pot × (stake × weight) / Σ(stake × weight). Omit `stakes`
  * to give every player a stake of 1, which is the plain-rank split.
- * Each player is floored. Leftover points are handed out in passes from the
- * top rank group down: a group receives +1 per eligible member only when the
- * leftover covers the whole group, otherwise that group is skipped. In the
- * stake-weighted split only members with a stake above 0 are eligible.
- * If no group fits, the leftover goes out one point at a time by earliest
- * input order. That is the only time tied players differ by 1. The shares
- * add up to `pot`.
+ * Each player is floored. One leftover pass visits rank groups by fractional
+ * remainder, highest first, and a better rank wins a remainder tie. A group
+ * receives +1 per eligible member only when the leftover covers the whole
+ * group. In the stake-weighted split only members with a stake above 0 are
+ * eligible. Anything still left goes out one point at a time by earliest
+ * input order, starting with the highest-remainder group that was skipped.
+ * That fallback is the only time tied players differ by 1. The shares add
+ * up to `pot`.
  */
 export function splitPot(
   placements: readonly Placement[],
@@ -202,6 +203,7 @@ export function splitPot(
     weight: number;
     order: number;
     floor: number;
+    remainder: number;
   }
 
   const groups: Member[][] = [];
@@ -221,6 +223,7 @@ export function splitPot(
         weight,
         order: ordered[cursor].order,
         floor: 0,
+        remainder: 0,
       });
     }
     groups.push(group);
@@ -238,32 +241,49 @@ export function splitPot(
   }
 
   for (const member of members) {
-    member.floor = Math.floor((safePot * member.stake * member.weight) / weightTotal);
+    const numerator = safePot * member.stake * member.weight;
+    member.floor = Math.floor(numerator / weightTotal);
+    member.remainder = numerator % weightTotal;
   }
   let leftover = safePot - members.reduce((sum, member) => sum + member.floor, 0);
   const extra = new Map<string, number>();
   const give = (member: Member) => {
     extra.set(member.playerId, (extra.get(member.playerId) ?? 0) + 1);
   };
-  const eligibleIn = (group: Member[]) => group.filter((member) => member.stake > 0);
+  const eligibleIn = (group: Member[]) => group
+    .filter((member) => member.stake > 0)
+    .sort((a, b) => a.order - b.order);
 
-  while (leftover > 0) {
-    let gave = false;
-    for (const group of groups) {
+  const byRemainder = groups
+    .map((group) => {
       const eligible = eligibleIn(group);
-      if (eligible.length === 0 || leftover < eligible.length) continue;
-      for (const member of eligible) give(member);
-      leftover -= eligible.length;
-      gave = true;
+      const remainder = eligible.reduce((best, member) => Math.max(best, member.remainder), 0);
+      return { eligible, remainder, rank: group[0]?.rank ?? 0 };
+    })
+    .filter((group) => group.eligible.length > 0)
+    .sort((a, b) => {
+      if (a.remainder !== b.remainder) return b.remainder - a.remainder;
+      return a.rank - b.rank;
+    });
+
+  const skipped: typeof byRemainder = [];
+  const awarded: typeof byRemainder = [];
+  for (const group of byRemainder) {
+    if (leftover < group.eligible.length) {
+      skipped.push(group);
+      continue;
     }
-    if (gave) continue;
-    const earliest = groups.flatMap((group) => eligibleIn(group)).sort((a, b) => a.order - b.order);
-    for (const member of earliest) {
-      if (leftover <= 0) break;
-      give(member);
-      leftover -= 1;
-    }
-    break;
+    for (const member of group.eligible) give(member);
+    leftover -= group.eligible.length;
+    awarded.push(group);
+  }
+
+  const oneAtATime = [...skipped, ...awarded].flatMap((group) => group.eligible);
+  let cursor = 0;
+  while (leftover > 0 && oneAtATime.length > 0) {
+    give(oneAtATime[cursor % oneAtATime.length]);
+    leftover -= 1;
+    cursor += 1;
   }
 
   return members.map((member) => ({
