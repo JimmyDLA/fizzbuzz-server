@@ -72,7 +72,11 @@ export class LobbyState extends Schema {
    * The app shows the "Betting round" banner from this flag.
    */
   @type("boolean") isBettingRound: boolean = false;
-  /** Sum of betWager for the players who staked this round. 0 outside a locked betting round. */
+  /**
+   * Sum of the stakes still in play. A player who left for good does not take
+   * their stake with them: it stays here and is paid to the seats that remain.
+   * 0 outside a locked betting round, and 0 again after an abort clears the display.
+   */
   @type("number") bettingPot: number = 0;
   /**
    * True after a no-action betting round returns every wager.

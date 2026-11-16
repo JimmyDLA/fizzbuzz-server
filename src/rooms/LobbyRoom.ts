@@ -1199,6 +1199,14 @@ export class LobbyRoom extends Room {
     }
 
     const placements = standingsForPlayers(seated, resolved, this.state.lastGameResult);
+    const seatedStake = seated.reduce((sum, id) => sum + (this.bettingStakes.get(id) ?? 0), 0);
+    // No remaining stake: the pot is only what leavers left behind. Split it
+    // like a refund instead of paying every rank 0 and losing the points.
+    if (seatedStake === 0) {
+      this.refundSeatedStakes("payout", false);
+      this.applyBettingDrinks(placements, resolved);
+      return;
+    }
     const stakes: Record<string, number> = {};
     for (const id of seated) stakes[id] = this.bettingStakes.get(id) ?? 0;
     const shares = splitPot(placements, this.state.bettingPot, stakes);
@@ -1248,35 +1256,85 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * Return each tracked stake to a player who still holds a seat, including
-   * someone in reconnect grace. A seat that was actually removed does not get
-   * the stake back, and that amount is dropped from the pot instead of paid
-   * to anyone else.
+   * Give the pot back to players who still hold a seat, including grace.
+   * Each gets their own stake, plus a largest-remainder share of whatever
+   * seats that left for good had staked. That share is proportional to the
+   * stake still in the room. If nobody remaining staked, the leavers' stakes
+   * are split equally and leftover points follow selection order.
+   * The leaver is not paid. The payouts add up to the original pot.
    */
   private refundSeatedStakes(
     reason: BettingPayoutReason,
     clearWager: boolean,
   ): void {
-    const payouts: BettingPayoutView[] = [];
-    let returned = 0;
+    const seated: Array<{ id: string; player: Player; wager: number; order: number }> = [];
+    let leaverPot = 0;
+    let order = 0;
     for (const [id, wager] of this.bettingStakes) {
       const player = this.state.players.get(id);
-      if (!player) continue;
-      player.score += wager;
-      player.betPayout = wager;
-      player.betNet = 0;
-      player.betRank = 0;
-      if (clearWager) {
-        player.betWager = 0;
-        player.betPayout = 0;
+      if (!player) {
+        leaverPot += wager;
+        continue;
       }
-      returned += wager;
+      seated.push({ id, player, wager, order });
+      order += 1;
+    }
+
+    const bonus = new Map<string, number>();
+    const seatedStake = seated.reduce((sum, seat) => sum + seat.wager, 0);
+    if (leaverPot > 0 && seated.length > 0 && seatedStake === 0) {
+      const base = Math.floor(leaverPot / seated.length);
+      let leftover = leaverPot - base * seated.length;
+      for (const seat of seated) {
+        const extra = leftover > 0 ? 1 : 0;
+        if (leftover > 0) leftover -= 1;
+        bonus.set(seat.id, base + extra);
+      }
+    } else if (leaverPot > 0 && seatedStake > 0) {
+      const rows = seated.map((seat) => {
+        const numerator = leaverPot * seat.wager;
+        return {
+          ...seat,
+          floor: Math.floor(numerator / seatedStake),
+          remainder: numerator % seatedStake,
+        };
+      });
+      let leftover = leaverPot - rows.reduce((sum, row) => sum + row.floor, 0);
+      const byRemainder = [...rows].sort((a, b) => {
+        if (a.remainder !== b.remainder) return b.remainder - a.remainder;
+        return a.order - b.order;
+      });
+      for (const row of byRemainder) {
+        if (leftover <= 0) break;
+        if (row.wager === 0) continue;
+        bonus.set(row.id, (bonus.get(row.id) ?? 0) + row.floor + 1);
+        leftover -= 1;
+      }
+      for (const row of rows) {
+        if (!bonus.has(row.id)) bonus.set(row.id, row.floor);
+      }
+    }
+
+    const payouts: BettingPayoutView[] = [];
+    let returned = 0;
+    for (const seat of seated) {
+      const payout = seat.wager + (bonus.get(seat.id) ?? 0);
+      seat.player.score += payout;
+      seat.player.betPayout = payout;
+      seat.player.betNet = payout - seat.wager;
+      seat.player.betRank = 0;
+      if (clearWager) {
+        seat.player.betWager = 0;
+        seat.player.betPayout = 0;
+        seat.player.betNet = 0;
+      }
+      returned += payout;
       payouts.push({
-        playerId: id,
-        name: player.name,
-        wager,
-        payout: wager,
-        net: 0,
+        playerId: seat.id,
+        name: seat.player.name,
+        wager: seat.wager,
+        payout,
+        net: payout - seat.wager,
         rank: 0,
       });
     }

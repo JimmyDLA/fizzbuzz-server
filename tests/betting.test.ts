@@ -885,28 +885,88 @@ describe("grace, abort, and non-betting rounds", () => {
     );
   });
 
-  it("drops a freed seat's stake out of a no-action refund", async () => {
+  it("keeps a leaver's stake in a paid pot and pays it to the players still ranked", async () => {
     const { room } = bootRoom();
-    const ada = addPlayer(room, "ada", { host: true, score: 9 });
-    const bea = addPlayer(room, "bea", { score: 9 });
-    const cal = addPlayer(room, "cal", { score: 1 });
+    addPlayer(room, "ada", { host: true, score: 9 });
+    addPlayer(room, "bea", { score: 9 });
+    const cal = addPlayer(room, "cal", { score: 9 });
     room.state.roundCount = 4;
     room.startWheelPhase();
+    assert.equal(room.state.bettingPot, 9);
+    room.state.phase = "playing";
+    await room.onLeave(cal as unknown as Client, CloseCode.CONSENTED);
+    assert.equal(room.state.players.has("cal"), false);
+    assert.equal(room.state.bettingPot, 9);
+
+    room.state.players.get("ada")!.gameScore = 8;
+    room.state.players.get("bea")!.gameScore = 2;
+    room.state.currentCategory = "Tapping Race";
+    room.activeGame = new TappingRace();
+    room.applyActiveGameResult();
+
+    assert.equal(room.state.players.get("ada")?.betPayout, 6);
+    assert.equal(room.state.players.get("ada")?.score, 12);
+    assert.equal(room.state.players.get("bea")?.betPayout, 3);
+    assert.equal(room.state.players.get("bea")?.score, 9);
+    assert.equal(
+      (room.state.players.get("ada")?.betPayout ?? 0) + (room.state.players.get("bea")?.betPayout ?? 0),
+      9,
+    );
+  });
+
+  it("refunds a leaver's stake to the remaining seats in proportion to what they staked", async () => {
+    const { room } = bootRoom();
+    addPlayer(room, "ada", { host: true, score: 9 });
+    addPlayer(room, "bea", { score: 1 });
+    const cal = addPlayer(room, "cal", { score: 9 });
+    room.state.roundCount = 4;
+    room.startWheelPhase();
+    const lockOrder = room.state.selectedPlayers.toArray();
     assert.equal(room.state.bettingPot, 7);
     room.state.phase = "playing";
     await room.onLeave(cal as unknown as Client, CloseCode.CONSENTED);
-    assert.equal(room.state.phase, "playing");
-    assert.equal(room.state.players.has("cal"), false);
 
     room.state.currentCategory = "Tapping Race";
     room.activeGame = new TappingRace();
     room.applyActiveGameResult();
+
+    const ada = room.state.players.get("ada")!;
+    const bea = room.state.players.get("bea")!;
     assert.equal(room.state.bettingRefunded, true);
-    assert.equal(room.state.bettingPot, 6);
-    assert.equal(room.state.players.get("ada")?.score, 9);
-    assert.equal(room.state.players.get("bea")?.score, 9);
-    assert.equal(room.state.players.get("ada")?.drinks, 1);
-    assert.equal(room.state.players.get("bea")?.drinks, 1);
+    assert.equal(room.state.bettingPot, 7);
+    assert.equal(ada.betPayout, 5);
+    assert.equal(bea.betPayout, 2);
+    assert.equal(ada.score, 11);
+    assert.equal(bea.score, 2);
+    assert.equal(ada.drinks, 1);
+    assert.equal(bea.drinks, 1);
+    assert.ok(lockOrder.includes("ada") && lockOrder.includes("bea"));
+  });
+
+  it("splits a leaver's stake equally when everyone left behind staked 0", async () => {
+    const { room } = bootRoom();
+    addPlayer(room, "ada", { host: true, score: 0 });
+    addPlayer(room, "bea", { score: 0 });
+    const cal = addPlayer(room, "cal", { score: 5 });
+    room.state.roundCount = 4;
+    room.startWheelPhase();
+    const remaining = room.state.selectedPlayers.toArray().filter((id) => id !== "cal");
+    assert.equal(room.state.bettingPot, 3);
+    room.state.phase = "playing";
+    await room.onLeave(cal as unknown as Client, CloseCode.CONSENTED);
+
+    room.state.currentCategory = "Tapping Race";
+    room.activeGame = new TappingRace();
+    room.applyActiveGameResult();
+
+    const first = room.state.players.get(remaining[0])!;
+    const second = room.state.players.get(remaining[1])!;
+    assert.equal(first.betPayout, 2);
+    assert.equal(second.betPayout, 1);
+    assert.equal(first.score, 2);
+    assert.equal(second.score, 1);
+    assert.equal(first.betPayout + second.betPayout, 3);
+    assert.equal(room.state.bettingPot, 3);
   });
 
   it("resets a settled pot on abort so the replay stakes from the scores already paid", async () => {
