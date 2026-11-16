@@ -13,7 +13,8 @@ import { SimonSays } from "../games/SimonSays";
 import { Scrabble } from "../games/Scrabble";
 import { ScreenPainting } from "../games/ScreenPainting";
 import { Perfection } from "../games/Perfection";
-import { applyDoublePoints, applyStandardScoring } from "./scoring";
+import { applyDoublePoints, scoreGameResult } from "./scoring";
+import { specialtyCardDropPool, specialtyCardRarity } from "./specialtyCards";
 import { MAX_ROOM_PLAYERS, connectedPlayerIds, hasEnoughConnectedPlayers } from "./connectedPlayers";
 import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "./lobbyErrors";
 
@@ -524,33 +525,15 @@ export class LobbyRoom extends Room {
 
     const totalPlayer = playerEntries.length;
     const totalSpecCards = Math.max(1, Math.floor(totalPlayer / 2));
-
-    const CARDS_ROSTER = [
-      { id: "RESPIN", rarity: 3 },
-      { id: "SHIELD", rarity: 3 },
-      { id: "TURBO", rarity: 2 },
-      { id: "DOUBLE POINTS", rarity: 2 },
-      { id: "WILD CARD", rarity: 1 },
-    ];
-
-    const generateWeightedCard = () => {
-      const pool = [
-        "RESPIN", "RESPIN", "RESPIN", "RESPIN",
-        "SHIELD", "SHIELD", "SHIELD", "SHIELD",
-        "TURBO", "TURBO",
-        "DOUBLE POINTS", "DOUBLE POINTS",
-        "WILD CARD"
-      ];
-      return pool[Math.floor(Math.random() * pool.length)];
-    };
-
-    const getRarity = (id: string) => CARDS_ROSTER.find(c => c.id === id)?.rarity ?? 3;
+    const pool = specialtyCardDropPool();
+    if (pool.length === 0) return;
 
     const generatedCards: string[] = [];
     for (let i = 0; i < totalSpecCards; i++) {
-      generatedCards.push(generateWeightedCard());
+      generatedCards.push(pool[Math.floor(Math.random() * pool.length)]);
     }
-    generatedCards.sort((a, b) => getRarity(a) - getRarity(b));
+    // Lowest rarity number is rarest, so the first card after this sort goes to last place.
+    generatedCards.sort((a, b) => specialtyCardRarity(a) - specialtyCardRarity(b));
 
     const rankedEntries = [...playerEntries].sort(([, a], [, b]) => {
       if (a.score !== b.score) return a.score - b.score;
@@ -862,13 +845,13 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * Games only report who won, who drinks, and who tied.
-   * Standard +3 / +1 drink is applied here, once, before resolution.
+   * Games report who won, who drinks, and how much each contestant did.
+   * A round where every reported action score is 0 has no winners and every
+   * contestant drinks. Standard +3 / +1 drink is applied here, once.
    */
   applyActiveGameResult() {
     if (!this.activeGame) return;
-    const result = this.activeGame.onEnd(this.state);
-    applyStandardScoring(this.state, result);
+    scoreGameResult(this.state, this.activeGame.onEnd(this.state));
   }
 
   startResolutionPhase() {
