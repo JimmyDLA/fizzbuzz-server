@@ -9,6 +9,9 @@ import { MAX_ROOM_PLAYERS } from "./connectedPlayers";
 export const LobbyErrorCode = {
   ROOM_FULL: "ROOM_FULL",
   NOT_ENOUGH_PLAYERS: "NOT_ENOUGH_PLAYERS",
+  NOT_HOST: "NOT_HOST",
+  INVALID_ROUNDS: "INVALID_ROUNDS",
+  ROUNDS_LOCKED: "ROUNDS_LOCKED",
 } as const;
 
 export type LobbyErrorCode = (typeof LobbyErrorCode)[keyof typeof LobbyErrorCode];
@@ -35,6 +38,27 @@ export function notEnoughPlayersError(): LobbyErrorPayload {
   };
 }
 
+export function notHostError(): LobbyErrorPayload {
+  return {
+    code: LobbyErrorCode.NOT_HOST,
+    message: "Only the host can set the match length.",
+  };
+}
+
+export function invalidRoundsError(): LobbyErrorPayload {
+  return {
+    code: LobbyErrorCode.INVALID_ROUNDS,
+    message: "Rounds must be 10, 15, 20, 30, 40, or 50.",
+  };
+}
+
+export function roundsLockedError(): LobbyErrorPayload {
+  return {
+    code: LobbyErrorCode.ROUNDS_LOCKED,
+    message: "Match length can only be changed in the lobby.",
+  };
+}
+
 export function formatLobbyError(error: LobbyErrorPayload): string {
   return `${error.code}: ${error.message}`;
 }
@@ -44,10 +68,10 @@ export function parseLobbyError(raw: string): LobbyErrorPayload | null {
   if (separator <= 0) return null;
   const code = raw.slice(0, separator);
   const message = raw.slice(separator + 2);
-  if (code !== LobbyErrorCode.ROOM_FULL && code !== LobbyErrorCode.NOT_ENOUGH_PLAYERS) {
+  if (!Object.values(LobbyErrorCode).includes(code as LobbyErrorCode)) {
     return null;
   }
-  return { code, message };
+  return { code: code as LobbyErrorCode, message };
 }
 
 let installed = false;

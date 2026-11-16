@@ -1,5 +1,5 @@
 import { Room, Client, CloseCode, ServerError } from "@colyseus/core";
-import { DrinkChain, LobbyState, Player } from "./schema/LobbyState";
+import { DrinkChain, LobbyState, Player, PodiumEntry } from "./schema/LobbyState";
 import { IMiniGame } from "../games/IMiniGame";
 import { TappingRace } from "../games/TappingRace";
 import { MathProblem } from "../games/MathProblem";
@@ -17,7 +17,15 @@ import { applyDoublePoints, applyStandardScoring, scoreGameResult } from "./scor
 import { claimRoomCodeNow, releaseRoomCode } from "./roomCodes";
 import { specialtyCardDropPool, specialtyCardRarity } from "./specialtyCards";
 import { MAX_ROOM_PLAYERS, connectedPlayerIds, hasEnoughConnectedPlayers } from "./connectedPlayers";
-import { LOBBY_ERROR_EVENT, notEnoughPlayersError } from "./lobbyErrors";
+import { LOBBY_ERROR_EVENT, invalidRoundsError, notEnoughPlayersError, notHostError, roundsLockedError } from "./lobbyErrors";
+import {
+  GAME_OVER_EVENT,
+  GameOverPayload,
+  RankedPlayer,
+  SET_ROUNDS_MESSAGE,
+  buildPodium,
+  isRoundChoice,
+} from "./matchLength";
 
 const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
@@ -77,6 +85,8 @@ export class LobbyRoom extends Room {
   private nextAcquiredAt = 1;
   private pendingDiscardTimers = new Map<string, { clear(): void }>();
   private isCardLocked: boolean = false;
+  /** Set once the podium is in room state and the room is closing. */
+  private matchOver: boolean = false;
   /** Session ids inside the reconnect grace window. They hold a seat until they return or the window ends. */
   private graceSessionIds = new Set<string>();
   /** Original join order. A grace reconnect keeps the same number, so host selection stays stable. */
@@ -113,6 +123,7 @@ export class LobbyRoom extends Room {
     this.assignUniqueRoomCode();
 
     this.onMessage("ready", (client, message) => {
+      if (this.matchOver) return;
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
       const canReady = (
@@ -140,10 +151,28 @@ export class LobbyRoom extends Room {
     // connected player is ready during chart. Ignore leftover clients.
     this.onMessage("start_wheel", () => {});
 
+    this.onMessage(SET_ROUNDS_MESSAGE, (client, message) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!this.isCurrentHost(player)) {
+        client.send(LOBBY_ERROR_EVENT, notHostError());
+        return;
+      }
+      if (this.state.phase !== "lobby") {
+        client.send(LOBBY_ERROR_EVENT, roundsLockedError());
+        return;
+      }
+      const rounds = message?.rounds;
+      if (!isRoundChoice(rounds)) {
+        client.send(LOBBY_ERROR_EVENT, invalidRoundsError());
+        return;
+      }
+      this.state.totalRounds = rounds;
+    });
+
     this.onMessage("dev_start_wheel", (client, message) => {
       if (!isDevToolsEnabled()) return;
       const player = this.state.players.get(client.sessionId);
-      if (player && this.isCurrentHost(player) && this.state.phase === "chart") {
+      if (player && this.isCurrentHost(player) && this.state.phase === "chart" && !this.matchOver) {
         const selectedPlayers = Array.isArray(message?.selectedPlayers) ? message.selectedPlayers : [];
         if (!this.forceWheelPhase(message?.type, message?.category, selectedPlayers)) {
           client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
@@ -566,9 +595,20 @@ export class LobbyRoom extends Room {
     this.state.lastGameResult = "";
   }
 
+  onDispose() {
+    if (this.gameLoopInterval) {
+      clearInterval(this.gameLoopInterval);
+      this.gameLoopInterval = null;
+    }
+    for (const timer of this.pendingDiscardTimers.values()) timer.clear();
+    this.pendingDiscardTimers.clear();
+    this.clearShieldHolds();
+    this.releaseClaimedRoomCode();
+  }
+
   /**
    * Host-only actions must use this. True only for the single connected host,
-   * so an offline flag cannot spin the wheel.
+   * so an offline flag cannot change the match length or the dev tools.
    */
   private isCurrentHost(player: Player | undefined): boolean {
     if (!player?.isHost || !player.isConnected) return false;
@@ -626,6 +666,7 @@ export class LobbyRoom extends Room {
   }
 
   async onLeave(client: Client, code?: number) {
+    if (this.matchOver) return;
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
@@ -922,6 +963,7 @@ export class LobbyRoom extends Room {
 
   checkAllReady() {
     this.syncReadyCounts();
+    if (this.matchOver) return;
     if (this.clients.length < 1) return;
     let allReady = true;
 
@@ -963,6 +1005,8 @@ export class LobbyRoom extends Room {
         this.state.phase = "chart";
       } else if (this.state.phase === "chart") {
         // No timer and no host override. A card play in flight keeps the Wild Card window.
+        // roundCount does not change here. The round this spin plays is roundCount + 1.
+        // Betting (every 5th round, including a final multiple of 5) hooks that value.
         if (this.isCardLocked || !hasEnoughConnectedPlayers(this.state.players)) {
           return;
         }
@@ -972,11 +1016,76 @@ export class LobbyRoom extends Room {
         this.clearReadyFlags();
         this.startCountdownPhase();
       } else if (this.state.phase === "resolution") {
-        this.clearReadyFlags();
-        this.state.phase = "chart";
-        this.clearShieldHolds();
+        // Shields have had the resolution window. Drinks and double points
+        // are already applied. The match ends only when this was the last round.
+        this.completeRound();
       }
     }
+  }
+
+  /**
+   * Resolution is finished, including Shield. `roundCount` was already
+   * incremented when this resolution started. The final round fills the
+   * podium and closes. Any earlier round returns to the chart with the
+   * same `roundCount`.
+   */
+  private completeRound(): void {
+    if (this.matchOver) return;
+    this.clearReadyFlags();
+    this.clearShieldHolds();
+    if (this.state.roundCount >= this.state.totalRounds) {
+      this.endMatch();
+      return;
+    }
+    this.state.phase = "chart";
+  }
+
+  private fillPodium(): GameOverPayload {
+    const ranked: RankedPlayer[] = [];
+    // Rank every seat still in the room. A reconnect-grace seat is disconnected
+    // but not removed, so it keeps its place. A consented leave has already
+    // deleted that player.
+    this.state.players.forEach((player, id) => {
+      ranked.push({ id, name: player.name, score: player.score });
+    });
+    const seats = buildPodium(ranked);
+    this.state.podium.clear();
+    for (const seat of seats) {
+      const entry = new PodiumEntry();
+      entry.place = seat.place;
+      entry.playerId = seat.playerId;
+      entry.name = seat.name;
+      entry.score = seat.score;
+      this.state.podium.push(entry);
+    }
+    return {
+      roundCount: this.state.roundCount,
+      totalRounds: this.state.totalRounds,
+      podium: seats,
+    };
+  }
+
+  /**
+   * Put gameover and the podium into room state, push that patch, then the
+   * GameOverEvent, then dispose the room so its code is freed.
+   */
+  private endMatch(): void {
+    if (this.matchOver) return;
+    // The podium snapshot keeps one connected host. Closing the room does not
+    // run onLeave's promotion, because matchOver returns first.
+    this.ensureConnectedHost();
+    this.matchOver = true;
+    if (this.gameLoopInterval) {
+      clearInterval(this.gameLoopInterval);
+      this.gameLoopInterval = null;
+    }
+    this.activeGame = null;
+    this.isCardLocked = false;
+    const payload = this.fillPodium();
+    this.state.phase = "gameover";
+    this.broadcastPatch();
+    this.broadcast(GAME_OVER_EVENT, payload);
+    void this.disconnect();
   }
 
   /**
@@ -1052,6 +1161,7 @@ export class LobbyRoom extends Room {
   }
 
   startWheelPhase(): boolean {
+    if (this.matchOver) return false;
     const contestantIds = connectedPlayerIds(this.state.players);
     if (!hasEnoughConnectedPlayers(this.state.players)) {
       return false;
@@ -1122,6 +1232,7 @@ export class LobbyRoom extends Room {
   }
 
   forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]): boolean {
+    if (this.matchOver) return false;
     const contestantIds = connectedPlayerIds(this.state.players, selectedPlayerIds);
     if (!hasEnoughConnectedPlayers(this.state.players, contestantIds)) {
       return false;
@@ -1279,6 +1390,8 @@ export class LobbyRoom extends Room {
     this.isCardLocked = false;
     this.clearShieldHolds();
     this.state.phase = "resolution";
+    // One increment, here only. Master and the earned-round lock both read
+    // this as "resolution N has started" before cards are dealt.
     this.state.roundCount += 1;
 
     // Process DOUBLE POINTS effect for winners
@@ -1295,12 +1408,5 @@ export class LobbyRoom extends Room {
     });
 
     this.seedDrinkChains();
-  }
-
-  onDispose() {
-    for (const timer of this.pendingDiscardTimers.values()) timer.clear();
-    this.pendingDiscardTimers.clear();
-    this.clearShieldHolds();
-    this.releaseClaimedRoomCode();
   }
 }
