@@ -256,6 +256,45 @@ describe("CRD-005 discard choice", () => {
     assert.equal(player.pendingDiscard, false);
     assert.equal(player.pendingDiscardDeadline, 0);
   });
+
+  it("a normal in-window discard still drops the chosen card", () => {
+    const { room, player } = overflow(["A", "B", "C"]);
+    emit(room, "discard_card", "ada", { cardIndex: 1 });
+    assert.deepEqual(hand(player), ["A", "C"]);
+    assert.equal(player.pendingDiscard, false);
+    assert.equal(player.pendingDiscardDeadline, 0);
+    advance(room, PENDING_DISCARD_MS + 50);
+    assert.deepEqual(hand(player), ["A", "C"]);
+  });
+
+  it("a late discard after the timeout does nothing", () => {
+    const { room, player } = overflow(["A", "B", "C"]);
+    advance(room, PENDING_DISCARD_MS + 50);
+    assert.deepEqual(hand(player), ["B", "C"]);
+    assert.equal(player.pendingDiscard, false);
+
+    emit(room, "discard_card", "ada", { cardIndex: 1 });
+    emit(room, "discard_card", "ada", { cardId: "B" });
+
+    assert.deepEqual(hand(player), ["B", "C"]);
+    assert.equal(player.pendingDiscard, false);
+    assert.equal(player.pendingDiscardDeadline, 0);
+  });
+
+  it("a discard with no pending discard does nothing", () => {
+    const room = setup();
+    const { player } = addPlayer(room, "ada", "Ada", true);
+    award(room, "ada", "A");
+    award(room, "ada", "B");
+    assert.equal(player.pendingDiscard, false);
+
+    emit(room, "discard_card", "ada", { cardIndex: 1 });
+    emit(room, "discard_card", "ada", { cardId: "A" });
+
+    assert.deepEqual(hand(player), ["A", "B"]);
+    assert.equal(player.pendingDiscard, false);
+    assert.equal(player.pendingDiscardDeadline, 0);
+  });
 });
 
 describe("15s auto-discard", () => {
