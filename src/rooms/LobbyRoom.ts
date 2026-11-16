@@ -1,5 +1,5 @@
 import { Room, Client, ServerError } from "@colyseus/core";
-import { LobbyState, Player } from "./schema/LobbyState";
+import { DrinkChain, LobbyState, Player } from "./schema/LobbyState";
 import { IMiniGame } from "../games/IMiniGame";
 import { TappingRace } from "../games/TappingRace";
 import { MathProblem } from "../games/MathProblem";
@@ -19,6 +19,22 @@ const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
 const EXCLUDED_TURBO_GAMES = ["Hot Potato", "Rock Paper Scissors", "Simon Says"];
 
+/**
+ * Drinks the next Shield passes for a player's merged total.
+ * An untouched loss sends the drinks they currently hold.
+ * Once a deflection is part of that total, the next pass sends those drinks plus 1. No cap.
+ */
+export function shieldDrinksToPass(drinks: number, deflections: number): number {
+  return deflections <= 0 ? drinks : drinks + 1;
+}
+
+export interface ShieldPassResult {
+  /** Merged amount this deflection passed. Same value as CardUsedEvent.drinksToPass. */
+  drinksToPass: number;
+  holderId: string;
+  deflections: number;
+}
+
 export class LobbyRoom extends Room {
   state!: LobbyState;
   maxClients = 8;
@@ -26,7 +42,6 @@ export class LobbyRoom extends Room {
   activeGame: IMiniGame | null = null;
   private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
   private isCardLocked: boolean = false;
-  private shieldChainCount: number = 0;
 
   onAuth(client: Client, options: any, request: any) {
     const requestedName = options?.name?.trim();
@@ -208,48 +223,7 @@ export class LobbyRoom extends Room {
           });
         }
       } else if (cardId === "SHIELD") {
-        if (this.state.phase === "resolution") {
-          const targetPlayerId = message.targetPlayerId;
-          const targetPlayer = this.state.players.get(targetPlayerId);
-          const currentDrinks = this.state.lastLosers.filter(id => id === client.sessionId).length;
-
-          // Prevent shielding self
-          if (currentDrinks > 0 && targetPlayer && targetPlayerId !== client.sessionId) {
-            player.cards.splice(cardIndex, 1);
-            this.shieldChainCount += 1;
-
-            // Remove all occurrences of user from lastLosers
-            while (this.state.lastLosers.indexOf(client.sessionId) !== -1) {
-              const idx = this.state.lastLosers.indexOf(client.sessionId);
-              this.state.lastLosers.splice(idx, 1);
-            }
-
-            // Deduct currentDrinks from player drinks counter
-            player.drinks = Math.max(0, player.drinks - currentDrinks);
-
-            // Escalate drinks penalty: 1st shield passes currentDrinks (e.g. 1), subsequent chained shields increment by +1 (2x, 3x, 4x, 5x...)
-            const drinksToPass = this.shieldChainCount === 1 ? currentDrinks : currentDrinks + 1;
-
-            // Add escalated drinks to target player
-            targetPlayer.drinks += drinksToPass;
-
-            // Pass all escalated drinks to target player in lastLosers
-            for (let i = 0; i < drinksToPass; i++) {
-              this.state.lastLosers.push(targetPlayerId);
-            }
-
-            const drinkStr = drinksToPass > 1 ? `${drinksToPass} drinks` : "the drink";
-            this.broadcast("CardUsedEvent", {
-              userId: client.sessionId,
-              playerName: player.name,
-              cardId: "SHIELD",
-              targetName: targetPlayer.name,
-              drinkCount: drinksToPass,
-              description: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`,
-              message: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`
-            });
-          }
-        }
+        this.applyShield(client.sessionId, message.targetPlayerId);
       }
     });
 
@@ -330,6 +304,109 @@ export class LobbyRoom extends Room {
     this.state.players.set(client.sessionId, player);
   }
 
+  /**
+   * Pass this player's entire merged drink total.
+   * A target who already owes drinks keeps one total: the passed amount is added to it.
+   * The next Shield on that total is `drinks + 1` once any deflection is included.
+   * Any other player is a legal target, including a 2v2 teammate and the player who just passed.
+   * The shielder cannot target themselves.
+   * Returns null, and does not consume the card, when the play is rejected.
+   */
+  applyShield(sessionId: string, targetPlayerId: string): ShieldPassResult | null {
+    if (this.state.phase !== "resolution") return null;
+
+    const player = this.state.players.get(sessionId);
+    const targetPlayer = targetPlayerId ? this.state.players.get(targetPlayerId) : undefined;
+    if (!player || !targetPlayer || targetPlayerId === sessionId) return null;
+
+    const cardIndex = player.cards.indexOf("SHIELD");
+    if (cardIndex === -1) return null;
+
+    const chain = this.state.drinkChains.get(sessionId);
+    if (!chain || chain.drinks <= 0) return null;
+
+    const drinksToPass = shieldDrinksToPass(chain.drinks, chain.deflections);
+    const heldDrinks = chain.drinks;
+    const passedDeflections = chain.deflections + 1;
+
+    player.cards.splice(cardIndex, 1);
+    player.drinks = Math.max(0, player.drinks - heldDrinks);
+    targetPlayer.drinks += drinksToPass;
+
+    const targetChain = this.state.drinkChains.get(targetPlayerId);
+    const mergedDrinks = targetChain ? targetChain.drinks + drinksToPass : drinksToPass;
+    const mergedDeflections = targetChain
+      ? Math.max(targetChain.deflections, passedDeflections)
+      : passedDeflections;
+
+    this.state.drinkChains.delete(sessionId);
+    const merged = this.writeDrinkChain(targetPlayerId, mergedDrinks, mergedDeflections);
+    this.syncLastLosersFromChains();
+
+    const drinkStr = drinksToPass > 1 ? `${drinksToPass} drinks` : "the drink";
+    this.broadcast("CardUsedEvent", {
+      userId: sessionId,
+      playerName: player.name,
+      cardId: "SHIELD",
+      targetName: targetPlayer.name,
+      targetPlayerId,
+      drinkCount: drinksToPass,
+      drinksToPass,
+      deflections: merged.deflections,
+      description: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`,
+      message: `${player.name} used SHIELD to pass ${drinkStr} to ${targetPlayer.name}!`
+    });
+
+    return {
+      drinksToPass,
+      holderId: targetPlayerId,
+      deflections: merged.deflections,
+    };
+  }
+
+  /** One merged total per player already in lastLosers. Amount is their current count, usually 1. */
+  private seedDrinkChains() {
+    const counts = new Map<string, number>();
+    const order: string[] = [];
+    for (const id of this.state.lastLosers.toArray()) {
+      if (!counts.has(id)) order.push(id);
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+
+    this.state.drinkChains.clear();
+    for (const holderId of order) {
+      this.writeDrinkChain(holderId, counts.get(holderId) ?? 0, 0);
+    }
+    this.syncLastLosersFromChains();
+  }
+
+  private writeDrinkChain(holderId: string, drinks: number, deflections: number): DrinkChain {
+    let chain = this.state.drinkChains.get(holderId);
+    if (!chain) {
+      chain = new DrinkChain();
+      chain.id = holderId;
+      chain.holderId = holderId;
+      this.state.drinkChains.set(holderId, chain);
+    }
+    chain.drinks = drinks;
+    chain.deflections = deflections;
+    chain.drinksToPass = shieldDrinksToPass(drinks, deflections);
+    return chain;
+  }
+
+  private syncLastLosersFromChains() {
+    this.state.lastLosers.clear();
+    this.state.drinkChains.forEach((chain) => {
+      for (let i = 0; i < chain.drinks; i++) {
+        this.state.lastLosers.push(chain.holderId);
+      }
+    });
+  }
+
+  private clearDrinkChains() {
+    this.state.drinkChains.clear();
+  }
+
   private abortGameToChart(reason: string) {
     console.log(`[AbortGame] Aborting game to chart. Reason: ${reason}`);
     if (this.gameLoopInterval) {
@@ -338,7 +415,7 @@ export class LobbyRoom extends Room {
     }
     this.activeGame = null;
     this.isCardLocked = false;
-    this.shieldChainCount = 0;
+    this.clearDrinkChains();
     this.state.phase = "chart";
     this.state.timer = 0;
     this.state.selectedPlayers.clear();
@@ -573,7 +650,7 @@ export class LobbyRoom extends Room {
 
   startWheelPhase() {
     this.isCardLocked = false;
-    this.shieldChainCount = 0;
+    this.clearDrinkChains();
     this.state.phase = "wheel";
     this.state.currentGameType = GAME_TYPES[Math.floor(Math.random() * GAME_TYPES.length)];
     this.state.currentCategory = CATEGORIES[Math.floor(Math.random() * CATEGORIES.length)];
@@ -635,7 +712,7 @@ export class LobbyRoom extends Room {
 
   forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]) {
     this.isCardLocked = false;
-    this.shieldChainCount = 0;
+    this.clearDrinkChains();
     this.state.phase = "wheel";
     this.state.currentGameType = type;
     this.state.currentCategory = category;
@@ -780,7 +857,6 @@ export class LobbyRoom extends Room {
 
   startResolutionPhase() {
     this.isCardLocked = false;
-    this.shieldChainCount = 0;
     this.state.phase = "resolution";
     this.state.roundCount += 1;
 
@@ -796,5 +872,7 @@ export class LobbyRoom extends Room {
     this.state.players.forEach(p => {
       p.activeEffects = "";
     });
+
+    this.seedDrinkChains();
   }
 }
