@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { GameResult, IMiniGame } from "../src/games/IMiniGame";
 import { LobbyState, Player } from "../src/rooms/schema/LobbyState";
 import { LobbyRoom } from "../src/rooms/LobbyRoom";
-import { applyStandardScoring } from "../src/rooms/scoring";
+import { scoreGameResult } from "../src/rooms/scoring";
 
 export interface TestPlayer {
   id: string;
@@ -92,15 +92,15 @@ function snapshotScores(state: LobbyState): Record<string, { score: number; drin
 }
 
 /**
- * End a mini-game the way LobbyRoom does: the game reports a result and does
- * not touch score or drinks, then the shared payout applies +3 and +1 drink.
+ * End a mini-game the way LobbyRoom does: onEnd reports a result and does not
+ * touch score or drinks, then scoreGameResult applies the no-action rule and
+ * the shared +3 / +1 drink payout.
  */
 export function settle(game: IMiniGame, state: LobbyState): GameResult {
   const before = snapshotScores(state);
   const result = game.onEnd(state);
   assert.deepEqual(snapshotScores(state), before, "onEnd must not change score or drinks");
-  applyStandardScoring(state, result);
-  return result;
+  return scoreGameResult(state, result);
 }
 
 export function assertOutcome(state: LobbyState, expected: ExpectedOutcome): void {
