@@ -412,7 +412,7 @@ describe("Shield chains", () => {
     assert.equal(drinks(state, "b"), 1);
   });
 
-  it("removes a holder's drink chain when they leave so a later pass cannot keep it", async () => {
+  it("clears a holder's drink chain when their seat is removed", async () => {
     const { room, state } = resolution(
       [
         { id: "a", name: "Ada", cards: ["SHIELD"] },
@@ -444,5 +444,43 @@ describe("Shield chains", () => {
     assert.equal(chain(state, "d").deflections, 1);
     assert.equal(chain(state, "d").drinksToPass, 2);
     assert.equal(drinks(state, "d"), 1);
+  });
+
+  it("keeps a holder's drink chain while reconnect grace still holds the seat", async () => {
+    const { room, state } = resolution(
+      [
+        { id: "a", name: "Ada", cards: ["SHIELD"] },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal" },
+      ],
+      ["a"],
+    );
+
+    pass(room, "a", "b");
+    assert.equal(chain(state, "b").drinks, 1);
+    assert.equal(chain(state, "b").drinksToPass, 2);
+
+    let rejectGrace: (error: Error) => void = () => {};
+    const grace = new Promise<unknown>((_resolve, reject) => {
+      rejectGrace = reject;
+    });
+    room.allowReconnection = (() => grace) as unknown as LobbyRoom["allowReconnection"];
+
+    const leaving = room.onLeave(client("b"), false);
+
+    assert.equal(state.players.has("b"), true);
+    assert.equal(state.players.get("b")?.isConnected, false);
+    assert.equal(state.drinkChains.has("b"), true);
+    assert.equal(chain(state, "b").drinks, 1);
+    assert.equal(chain(state, "b").deflections, 1);
+    assert.equal(chain(state, "b").drinksToPass, 2);
+    assert.equal(owed(state, "b"), 1);
+
+    rejectGrace(new Error("grace expired"));
+    await leaving;
+
+    assert.equal(state.players.has("b"), false);
+    assert.equal(state.drinkChains.has("b"), false);
+    assert.equal(owed(state, "b"), 0);
   });
 });

@@ -408,8 +408,9 @@ export class LobbyRoom extends Room {
   }
 
   /**
-   * A departed holder must not leave a drink total behind.
-   * A later pass merges into whatever chain the target still has, so a stale entry would be included.
+   * Drop this holder's drink total when their seat is deleted.
+   * Called from removePlayer only. A disconnect that still holds the seat,
+   * including the 120s reconnect grace, keeps the chain.
    */
   private dropDrinkChain(sessionId: string) {
     let removed = this.state.drinkChains.delete(sessionId);
@@ -471,7 +472,6 @@ export class LobbyRoom extends Room {
 
     const cardsArray = player.cards.toArray ? player.cards.toArray() : Array.from(player.cards);
     player.isConnected = false;
-    this.dropDrinkChain(client.sessionId);
 
     // Check if player was part of the current active game session
     const isMidGame = this.state.phase === "playing" || this.state.phase === "countdown" || this.state.phase === "wheel";
