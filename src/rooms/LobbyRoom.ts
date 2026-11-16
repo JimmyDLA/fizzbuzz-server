@@ -19,12 +19,21 @@ const GAME_TYPES = ["1v1", "2v2", "BR"];
 const CATEGORIES = ["Tapping Race", "Math Problem", "Hot Potato", "Lumber Cut", "Trivia", "Rock Paper Scissors", "Cyclone", "Balloon Inflate", "Simon Says", "Scrabble", "Screen Painting", "Perfection"];
 const EXCLUDED_TURBO_GAMES = ["Hot Potato", "Rock Paper Scissors", "Simon Says"];
 
+/** A hand may hold two cards. One extra card is temporary so the player can choose what to drop. */
+export const HAND_CAP = 2;
+/** Window before the server discards the card the player has held the longest. */
+export const PENDING_DISCARD_MS = 15_000;
+
 export class LobbyRoom extends Room {
   state!: LobbyState;
   maxClients = 8;
   gameLoopInterval: any;
   activeGame: IMiniGame | null = null;
-  private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], activeEffects: string }>();
+  private disconnectedPlayersCache = new Map<string, { score: number, drinks: number, cards: string[], cardAcquiredAt: number[], activeEffects: string }>();
+  /** Parallel to `player.cards`: lower means held longer. Keyed by session id. */
+  private cardAcquiredAt = new Map<string, number[]>();
+  private nextAcquiredAt = 1;
+  private pendingDiscardTimers = new Map<string, { clear(): void }>();
   private isCardLocked: boolean = false;
   private shieldChainCount: number = 0;
 
@@ -54,7 +63,8 @@ export class LobbyRoom extends Room {
 
     this.onMessage("ready", (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      if (player && (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution")) {
+      if (!player || this.handBlocksActions(player)) return;
+      if (this.state.phase === "lobby" || this.state.phase === "wheel" || this.state.phase === "resolution") {
         player.isReady = message.isReady;
       }
       this.checkAllReady();
@@ -83,7 +93,7 @@ export class LobbyRoom extends Room {
       const targetPlayer = this.state.players.get(targetPlayerId);
       if (!targetPlayer || !cardId) return;
 
-      targetPlayer.cards.push(cardId);
+      if (!this.awardCard(targetPlayer, cardId)) return;
 
       const targetClient = this.clients.find(c => c.sessionId === targetPlayerId);
       if (targetClient) {
@@ -103,7 +113,7 @@ export class LobbyRoom extends Room {
 
     this.onMessage("use_card", (client, message) => {
       const player = this.state.players.get(client.sessionId);
-      if (!player) return;
+      if (!player || this.handBlocksActions(player)) return;
 
       const cardId = message.cardId;
       const cardIndex = player.cards.indexOf(cardId);
@@ -112,7 +122,7 @@ export class LobbyRoom extends Room {
       if (cardId === "RESPIN") {
         if ((this.state.phase === "wheel" || this.state.phase === "chart") && !this.isCardLocked) {
           this.isCardLocked = true;
-          player.cards.splice(cardIndex, 1);
+          this.removeCardAt(player, cardIndex);
 
           // Reset ready status for all players
           this.state.players.forEach(p => p.isReady = false);
@@ -137,7 +147,7 @@ export class LobbyRoom extends Room {
       } else if (cardId === "WILD CARD") {
         if ((this.state.phase === "wheel" || this.state.phase === "chart") && !this.isCardLocked) {
           this.isCardLocked = true;
-          player.cards.splice(cardIndex, 1);
+          this.removeCardAt(player, cardIndex);
 
           const category = message.category || CATEGORIES[0];
           const selectedPlayers = message.selectedPlayers || Array.from(this.state.players.keys()).slice(0, 2);
@@ -174,7 +184,7 @@ export class LobbyRoom extends Room {
             return;
           }
 
-          player.cards.splice(cardIndex, 1);
+          this.removeCardAt(player, cardIndex);
           let fx: any = {};
           try { fx = JSON.parse(player.activeEffects || "{}"); } catch(e) {}
           fx.turbo = true;
@@ -194,7 +204,7 @@ export class LobbyRoom extends Room {
             return;
           }
 
-          player.cards.splice(cardIndex, 1);
+          this.removeCardAt(player, cardIndex);
           let fx: any = {};
           try { fx = JSON.parse(player.activeEffects || "{}"); } catch(e) {}
           fx.doublePoints = true;
@@ -215,7 +225,7 @@ export class LobbyRoom extends Room {
 
           // Prevent shielding self
           if (currentDrinks > 0 && targetPlayer && targetPlayerId !== client.sessionId) {
-            player.cards.splice(cardIndex, 1);
+            this.removeCardAt(player, cardIndex);
             this.shieldChainCount += 1;
 
             // Remove all occurrences of user from lastLosers
@@ -257,13 +267,15 @@ export class LobbyRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
 
+      let removed = false;
       if (typeof message.cardIndex === "number" && message.cardIndex >= 0 && message.cardIndex < player.cards.length) {
-        player.cards.splice(message.cardIndex, 1);
+        removed = this.removeCardAt(player, message.cardIndex);
       } else if (message.cardId) {
         const idx = player.cards.indexOf(message.cardId);
-        if (idx !== -1) {
-          player.cards.splice(idx, 1);
-        }
+        if (idx !== -1) removed = this.removeCardAt(player, idx);
+      }
+      if (removed && player.cards.length <= HAND_CAP) {
+        this.clearPendingDiscard(player);
       }
     });
   }
@@ -295,9 +307,11 @@ export class LobbyRoom extends Room {
         player.score = oldPlayer.score;
         player.drinks = oldPlayer.drinks;
         player.isHost = oldPlayer.isHost;
-        player.cards.push(...oldPlayer.cards);
+        this.copyHeldCards(player, oldPlayer.cards, this.cardAcquiredAt.get(existingPlayerId));
         player.activeEffects = oldPlayer.activeEffects;
       }
+      this.clearPendingDiscardTimer(existingPlayerId);
+      this.cardAcquiredAt.delete(existingPlayerId);
       // Remove the old player object
       this.state.players.delete(existingPlayerId);
       console.log(`[Rejoin] ${player.name} rejoined from active disconnected session.`);
@@ -308,7 +322,7 @@ export class LobbyRoom extends Room {
         player.score = cached.score;
         player.drinks = cached.drinks;
         if (cached.cards && cached.cards.length > 0) {
-          player.cards.push(...cached.cards);
+          this.copyHeldCards(player, cached.cards, cached.cardAcquiredAt);
         }
         if (cached.activeEffects) {
           player.activeEffects = cached.activeEffects;
@@ -317,6 +331,9 @@ export class LobbyRoom extends Room {
       this.disconnectedPlayersCache.delete(nameLower);
       console.log(`[Rejoin] ${player.name} rejoined from offline cache.`);
     }
+
+    // A rejoin must not restore a hand over the cap. Drop the newest award, not an older card.
+    this.discardNewestOverCap(player);
 
     // Resolve host status: if no host exists in the lobby, make this player host
     let hostExists = false;
@@ -375,7 +392,10 @@ export class LobbyRoom extends Room {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
+    // Disconnect ends the choice. The temporary award does not survive the leave.
+    this.discardNewestOverCap(player);
     const cardsArray = player.cards.toArray ? player.cards.toArray() : Array.from(player.cards);
+    const cardAcquiredAt = [...(this.cardAcquiredAt.get(player.id) ?? [])];
     player.isConnected = false;
 
     // Check if player was part of the current active game session
@@ -416,6 +436,7 @@ export class LobbyRoom extends Room {
         score: player.score,
         drinks: player.drinks,
         cards: cardsArray,
+        cardAcquiredAt,
         activeEffects: player.activeEffects || "{}"
       });
       this.removePlayer(client.sessionId);
@@ -432,10 +453,143 @@ export class LobbyRoom extends Room {
           score: player.score,
           drinks: player.drinks,
           cards: cardsArray,
+          cardAcquiredAt,
           activeEffects: player.activeEffects || "{}"
         });
         this.removePlayer(client.sessionId);
       }
+    }
+  }
+
+  /**
+   * The only place a card is awarded into a hand.
+   * A later ticket can stamp award metadata (the round the card was earned) on `cardId` here,
+   * before `pushCard`. Reconnect restores cards through `copyHeldCards` and must not re-stamp them.
+   * Returns false when the hand already has its temporary third card; that award is skipped.
+   */
+  private awardCard(player: Player, cardId: string): boolean {
+    if (player.pendingDiscard || player.cards.length > HAND_CAP) {
+      console.log(`[awardCard] Skipped ${cardId} for ${player.name}: discard already pending`);
+      return false;
+    }
+
+    this.pushCard(player, cardId);
+    if (player.cards.length > HAND_CAP) {
+      this.beginPendingDiscard(player);
+    }
+    return true;
+  }
+
+  private pushCard(player: Player, cardId: string, acquiredAt?: number): void {
+    const order = this.orderFor(player);
+    while (order.length < player.cards.length) {
+      order.push(this.nextAcquiredAt++);
+    }
+    let stamp = acquiredAt;
+    if (stamp === undefined) {
+      stamp = this.nextAcquiredAt++;
+    } else if (stamp >= this.nextAcquiredAt) {
+      this.nextAcquiredAt = stamp + 1;
+    }
+    player.cards.push(cardId);
+    order.push(stamp);
+  }
+
+  private copyHeldCards(player: Player, cards: ArrayLike<string>, acquiredAt?: number[]): void {
+    const stamps = acquiredAt ?? [];
+    const useStamps = stamps.length === cards.length;
+    for (let i = 0; i < cards.length; i++) {
+      this.pushCard(player, cards[i], useStamps ? stamps[i] : undefined);
+    }
+  }
+
+  private orderFor(player: Player): number[] {
+    let order = this.cardAcquiredAt.get(player.id);
+    if (!order) {
+      order = [];
+      this.cardAcquiredAt.set(player.id, order);
+    }
+    return order;
+  }
+
+  private removeCardAt(player: Player, index: number): boolean {
+    if (index < 0 || index >= player.cards.length) return false;
+    const order = this.cardAcquiredAt.get(player.id);
+    if (order && index < order.length) order.splice(index, 1);
+    player.cards.splice(index, 1);
+    return true;
+  }
+
+  private oldestHeldIndex(player: Player): number {
+    const order = this.cardAcquiredAt.get(player.id);
+    if (!order || order.length !== player.cards.length || player.cards.length === 0) return 0;
+    let oldest = 0;
+    for (let i = 1; i < order.length; i++) {
+      if (order[i] < order[oldest]) oldest = i;
+    }
+    return oldest;
+  }
+
+  private newestHeldIndex(player: Player): number {
+    const last = player.cards.length - 1;
+    const order = this.cardAcquiredAt.get(player.id);
+    if (!order || order.length !== player.cards.length || last < 0) return last;
+    let newest = 0;
+    for (let i = 1; i < order.length; i++) {
+      if (order[i] >= order[newest]) newest = i;
+    }
+    return newest;
+  }
+
+  private handBlocksActions(player: Player): boolean {
+    return player.pendingDiscard || player.cards.length > HAND_CAP;
+  }
+
+  private beginPendingDiscard(player: Player): void {
+    player.pendingDiscard = true;
+    player.pendingDiscardDeadline = Date.now() + PENDING_DISCARD_MS;
+    player.isReady = false;
+    this.armPendingDiscard(player);
+  }
+
+  private armPendingDiscard(player: Player): void {
+    this.clearPendingDiscardTimer(player.id);
+    const timer = this.clock.setTimeout(() => {
+      this.pendingDiscardTimers.delete(player.id);
+      if (this.state.players.get(player.id) !== player) return;
+      this.discardOldestOverCap(player);
+    }, PENDING_DISCARD_MS);
+    this.pendingDiscardTimers.set(player.id, timer);
+  }
+
+  private clearPendingDiscardTimer(playerId: string): void {
+    const timer = this.pendingDiscardTimers.get(playerId);
+    if (!timer) return;
+    timer.clear();
+    this.pendingDiscardTimers.delete(playerId);
+  }
+
+  private clearPendingDiscard(player: Player): void {
+    player.pendingDiscard = false;
+    player.pendingDiscardDeadline = 0;
+    this.clearPendingDiscardTimer(player.id);
+  }
+
+  /** No pick within the window: drop the card held the longest. The new award stays. */
+  private discardOldestOverCap(player: Player): void {
+    while (player.cards.length > HAND_CAP) {
+      this.removeCardAt(player, this.oldestHeldIndex(player));
+    }
+    this.clearPendingDiscard(player);
+  }
+
+  /** Disconnect or a cache rejoin: drop the newest award until the hand is back at the cap. */
+  private discardNewestOverCap(player: Player): void {
+    while (player.cards.length > HAND_CAP) {
+      this.removeCardAt(player, this.newestHeldIndex(player));
+    }
+    if (player.pendingDiscard || player.pendingDiscardDeadline !== 0) {
+      this.clearPendingDiscard(player);
     }
   }
 
@@ -478,8 +632,8 @@ export class LobbyRoom extends Room {
       return b.drinks - a.drinks;
     });
 
-    const sendCardAward = (sessionId: string, player: any, cardId: string, isLastPlace: boolean) => {
-      player.cards.push(cardId);
+    const sendCardAward = (sessionId: string, player: Player, cardId: string, isLastPlace: boolean) => {
+      if (!this.awardCard(player, cardId)) return;
       const client = this.clients.find(c => c.sessionId === sessionId);
       if (client) {
         client.send("CardAwardedEvent", {
@@ -516,6 +670,8 @@ export class LobbyRoom extends Room {
   }
 
   private removePlayer(sessionId: string) {
+    this.clearPendingDiscardTimer(sessionId);
+    this.cardAcquiredAt.delete(sessionId);
     const wasHost = this.state.players.get(sessionId)?.isHost;
     this.state.players.delete(sessionId);
 
@@ -541,7 +697,7 @@ export class LobbyRoom extends Room {
         const p = this.state.players.get(id);
         if (p && p.isConnected) {
           connectedSelectedCount++;
-          if (!p.isReady) allReady = false;
+          if (this.handBlocksActions(p) || !p.isReady) allReady = false;
         }
       });
       if (connectedSelectedCount === 0) allReady = false;
@@ -551,7 +707,7 @@ export class LobbyRoom extends Room {
       this.state.players.forEach((player: Player) => {
         if (player.isConnected) {
           connectedCount++;
-          if (!player.isReady) allReady = false;
+          if (this.handBlocksActions(player) || !player.isReady) allReady = false;
         }
       });
       if (connectedCount === 0) allReady = false;
@@ -594,7 +750,7 @@ export class LobbyRoom extends Room {
             if (fx.turbo) {
               fx.turbo = false;
               p.activeEffects = JSON.stringify(fx);
-              p.cards.push("TURBO");
+              this.awardCard(p, "TURBO");
             }
           } catch(e) {}
         }
@@ -649,7 +805,7 @@ export class LobbyRoom extends Room {
             if (fx.turbo) {
               fx.turbo = false;
               p.activeEffects = JSON.stringify(fx);
-              p.cards.push("TURBO");
+              this.awardCard(p, "TURBO");
             }
           } catch(e) {}
         }
@@ -796,5 +952,10 @@ export class LobbyRoom extends Room {
     this.state.players.forEach(p => {
       p.activeEffects = "";
     });
+  }
+
+  onDispose() {
+    for (const timer of this.pendingDiscardTimers.values()) timer.clear();
+    this.pendingDiscardTimers.clear();
   }
 }
