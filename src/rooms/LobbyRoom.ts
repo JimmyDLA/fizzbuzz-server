@@ -407,6 +407,23 @@ export class LobbyRoom extends Room {
     this.state.drinkChains.clear();
   }
 
+  /**
+   * A departed holder must not leave a drink total behind.
+   * A later pass merges into whatever chain the target still has, so a stale entry would be included.
+   */
+  private dropDrinkChain(sessionId: string) {
+    let removed = this.state.drinkChains.delete(sessionId);
+    const staleIds: string[] = [];
+    this.state.drinkChains.forEach((chain, id) => {
+      if (chain.holderId === sessionId) staleIds.push(id);
+    });
+    for (const id of staleIds) {
+      this.state.drinkChains.delete(id);
+      removed = true;
+    }
+    if (removed) this.syncLastLosersFromChains();
+  }
+
   private abortGameToChart(reason: string) {
     console.log(`[AbortGame] Aborting game to chart. Reason: ${reason}`);
     if (this.gameLoopInterval) {
@@ -454,6 +471,7 @@ export class LobbyRoom extends Room {
 
     const cardsArray = player.cards.toArray ? player.cards.toArray() : Array.from(player.cards);
     player.isConnected = false;
+    this.dropDrinkChain(client.sessionId);
 
     // Check if player was part of the current active game session
     const isMidGame = this.state.phase === "playing" || this.state.phase === "countdown" || this.state.phase === "wheel";
@@ -594,6 +612,7 @@ export class LobbyRoom extends Room {
 
   private removePlayer(sessionId: string) {
     const wasHost = this.state.players.get(sessionId)?.isHost;
+    this.dropDrinkChain(sessionId);
     this.state.players.delete(sessionId);
 
     const idx = this.state.selectedPlayers.indexOf(sessionId);

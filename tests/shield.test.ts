@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { LobbyRoom } from "../src/rooms/LobbyRoom";
 import { DrinkChain, LobbyState, Player } from "../src/rooms/schema/LobbyState";
+import { client } from "./helpers";
 
 interface PlayerSpec {
   id: string;
@@ -409,5 +410,39 @@ describe("Shield chains", () => {
     assert.equal(room.applyShield("a", "b"), null);
     assert.equal(shields(state, "a"), 1);
     assert.equal(drinks(state, "b"), 1);
+  });
+
+  it("removes a holder's drink chain when they leave so a later pass cannot keep it", async () => {
+    const { room, state } = resolution(
+      [
+        { id: "a", name: "Ada", cards: ["SHIELD"] },
+        { id: "b", name: "Bea" },
+        { id: "c", name: "Cal", cards: ["SHIELD"] },
+        { id: "d", name: "Dee" },
+      ],
+      ["a", "c"],
+    );
+
+    pass(room, "a", "b");
+    assert.equal(chain(state, "b").drinks, 1);
+    assert.equal(chain(state, "b").deflections, 1);
+    assert.equal(chain(state, "b").drinksToPass, 2);
+
+    await room.onLeave(client("b"), true);
+
+    assert.equal(state.players.has("b"), false);
+    assert.equal(state.drinkChains.has("b"), false);
+    assert.equal(owed(state, "b"), 0);
+    assert.equal(chain(state, "c").drinks, 1);
+    assert.equal(chain(state, "c").deflections, 0);
+    assert.equal(chain(state, "c").drinksToPass, 1);
+
+    assert.equal(pass(room, "c", "d").drinksToPass, 1);
+    assert.equal(state.drinkChains.has("b"), false);
+    assert.equal(owed(state, "b"), 0);
+    assert.equal(chain(state, "d").drinks, 1);
+    assert.equal(chain(state, "d").deflections, 1);
+    assert.equal(chain(state, "d").drinksToPass, 2);
+    assert.equal(drinks(state, "d"), 1);
   });
 });
