@@ -198,7 +198,9 @@ export class LobbyRoom extends Room {
       const player = this.state.players.get(client.sessionId);
       if (player && this.isCurrentHost(player) && this.state.phase === "chart" && !this.matchOver) {
         const selectedPlayers = Array.isArray(message?.selectedPlayers) ? message.selectedPlayers : [];
-        if (!this.forceWheelPhase(message?.type, message?.category, selectedPlayers)) {
+        // The dev menu is an override. The real wheel and a Wild Card still force
+        // Battle Royale on a betting round; only this call passes the override flag.
+        if (!this.forceWheelPhase(message?.type, message?.category, selectedPlayers, true)) {
           client.send(LOBBY_ERROR_EVENT, notEnoughPlayersError());
         }
       }
@@ -214,7 +216,10 @@ export class LobbyRoom extends Room {
       const targetPlayer = this.state.players.get(targetPlayerId);
       if (!targetPlayer || !cardId) return;
 
-      if (!this.awardCard(targetPlayer, cardId)) return;
+      // Playable on this chart. A normal drop still stamps the round in progress
+      // and stays locked until the next round. 0 is before round 1, so the lock
+      // (`earnedRound >= currentRound`) does not apply. The hand cap still applies.
+      if (!this.awardCard(targetPlayer, cardId, 0)) return;
 
       const targetClient = this.clients.find(c => c.sessionId === targetPlayerId);
       if (targetClient) {
@@ -1415,10 +1420,11 @@ export class LobbyRoom extends Room {
     return true;
   }
 
-  forceWheelPhase(type: string, category: string, selectedPlayerIds: string[]): boolean {
+  forceWheelPhase(type: string, category: string, selectedPlayerIds: string[], devOverride = false): boolean {
     if (this.matchOver) return false;
-    const betting = this.roundWillBeBetting();
-    // A betting round ignores a requested 1v1 or 2v2 subset and plays everyone.
+    // A betting round's wheel and Wild Card ignore a requested 1v1 or 2v2 and play everyone.
+    // The host dev menu passes devOverride so the requested type and roster are kept.
+    const betting = this.roundWillBeBetting() && !devOverride;
     const contestantIds = connectedPlayerIds(
       this.state.players,
       betting ? undefined : selectedPlayerIds,
