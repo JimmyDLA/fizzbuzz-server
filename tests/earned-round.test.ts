@@ -91,9 +91,20 @@ function seedChains(room: LobbyRoom): void {
   (room as unknown as { seedDrinkChains(): void }).seedDrinkChains();
 }
 
+function roundInProgress(room: LobbyRoom): number {
+  if (room.state.phase === "resolution") return room.state.roundCount;
+  return room.state.roundCount + 1;
+}
+
 function award(room: LobbyRoom, id: string, cardId: string, from = id): void {
   enableDevTools();
+  const player = room.state.players.get(id);
+  const before = player?.cards.length ?? 0;
   emit(room, "dev_award_card", from, { targetPlayerId: id, cardId });
+  if (!player || player.cards.length === before) return;
+  // A dev grant is playable immediately (earned round 0). These lock tests
+  // still need the card stamped for the round in progress.
+  player.earnedRounds[player.earnedRounds.length - 1] = roundInProgress(room);
 }
 
 /** A forced spin needs two connected players once the wheel checks the floor. */
@@ -173,18 +184,27 @@ describe("earned round is stamped once, in awardCard", () => {
     assert.equal(usedEvents(room).length, 0);
   });
 
-  it("stamps a dev grant with the round in progress", () => {
+  it("stamps a dev grant as already usable", () => {
     const room = setup();
     const { player, messages } = addPlayer(room, "ada", "Ada", true);
+    addPlayer(room, "bea", "Bea");
     room.state.phase = "wheel";
     room.state.roundCount = 4;
+    room.state.currentCategory = "Tapping Race";
+    room.state.selectedPlayers.push("ada");
 
-    award(room, "ada", "TURBO");
+    emit(room, "dev_award_card", "ada", { cardId: "TURBO" });
 
     assert.deepEqual(hand(player), ["TURBO"]);
-    assert.deepEqual(rounds(player), [5]);
+    assert.deepEqual(rounds(player), [0]);
     const awarded = messages.filter((entry) => entry.type === "CardAwardedEvent");
-    assert.equal((awarded[0].data as { earnedRound: number }).earnedRound, 5);
+    assert.equal((awarded[0].data as { earnedRound: number }).earnedRound, 0);
+
+    const errors: Sent[] = [];
+    emit(room, "use_card", "ada", { cardId: "TURBO" }, errors);
+    assert.equal(errors.length, 0);
+    assert.deepEqual(hand(player), []);
+    assert.equal(JSON.parse(player.activeEffects).turbo, true);
   });
 });
 
